@@ -4,7 +4,7 @@
 #include <Stepper.h>
 
 // ----- Wi-Fi Access Point Configuration -----
-const char* ssid = "ESP_Motor_Control";   // Wi-Fi name (you’ll see this on your phone)
+const char* ssid = "ESP_Motor_Control";   // Wi-Fi name
 const char* password = "12345678";        // minimum 8 characters
 
 // ----- Stepper Motor Setup -----

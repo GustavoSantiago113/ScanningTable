@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ESP8266 Stepper Control</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: sans-serif; text-align: center; background: #f2f2f2; padding: 40px; }
+    button {
+      font-size: 18px; margin: 10px; padding: 15px 25px;
+      border: none; border-radius: 10px;
+      background: #0078D7; color: white; cursor: pointer;
+    }
+    button:hover { background: #005FA3; }
+    #log { text-align: left; margin-top: 20px; background: #fff; padding: 10px; border-radius: 10px; }
+  </style>
+</head>
+<body>
+  <h2>ESP8266 Stepper Motor WebSocket Control</h2>
+
+  <input type="number" id="turns" value="6" min="1" style="width:60px;"> turns<br>
+  <input type="number" id="stops" value="12" min="1" style="width:60px;"> stops<br><br>
+
+  <button onclick="sendStart()">Start</button>
+  <button onclick="sendContinue()">Continue</button>
+  <button onclick="sendStop()">Stop</button>
+
+  <div id="log"></div>
+
+  <script>
+    const logDiv = document.getElementById("log");
+    function log(msg) {
+      logDiv.innerHTML += msg + "<br>";
+      logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    const ws = new WebSocket("ws://192.168.4.1:81");
+
+    ws.onopen = () => log("✅ Connected to ESP8266");
+    ws.onmessage = (event) => log("📩 " + event.data);
+    ws.onclose = () => log("❌ Disconnected");
+    ws.onerror = (err) => log("⚠️ WebSocket error: " + err);
+
+    function sendStart() {
+      const turns = document.getElementById("turns").value;
+      const stops = document.getElementById("stops").value;
+      ws.send(`START ${turns} ${stops}`);
+      log(`➡️ Sent: START ${turns} ${stops}`);
+    }
+
+    function sendContinue() {
+      ws.send("CONTINUE");
+      log("➡️ Sent: CONTINUE");
+    }
+
+    function sendStop() {
+      ws.send("STOP");
+      log("➡️ Sent: STOP");
+    }
+  </script>
+</body>
+</html>

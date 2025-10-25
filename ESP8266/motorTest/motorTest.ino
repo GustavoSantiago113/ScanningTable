@@ -1,28 +1,25 @@
-#include <Arduino.h>
 #include <Stepper.h>
+#define STEPS_PER_REV 2048
 
-// 28BYJ-48 has 2048 steps per revolution (in half-step mode)
-#define STEPS_PER_REV 2048  
+#define IN1 5   // D1
+#define IN2 4   // D2
+#define IN3 14  // D5
+#define IN4 12  // D6
 
-// Define motor control pins
-Stepper stepper(STEPS_PER_REV, 5, 0, 4, 2);
+#define STEPS_PER_REV 2048
+Stepper stepper(STEPS_PER_REV, IN1, IN3, IN2, IN4);
 
 void setup() {
   Serial.begin(115200);
-  stepper.setSpeed(10); // 10 RPM
-  Serial.println("Stepper Motor Test Starting...");
+  stepper.setSpeed(8);
+  Serial.println("Testing stepper...");
 }
 
 void loop() {
-  // 60 degrees = 1/6 of a revolution
-  int steps_per_60deg = STEPS_PER_REV / 6;
-
-  // Repeat until full 360° turn
-  for (int i = 0; i < 5; i++) {
-    stepper.step(steps_per_60deg);
-    delay(3000); // 3 seconds
-    Serial.print("Rotated ");;
-    Serial.print((i + 1) * 60);
-    Serial.println(" degrees");
-  }
+  Serial.println("Forward 360°");
+  stepper.step(STEPS_PER_REV);
+  delay(2000);
+  Serial.println("Backward 360°");
+  stepper.step(-STEPS_PER_REV);
+  delay(2000);
 }
