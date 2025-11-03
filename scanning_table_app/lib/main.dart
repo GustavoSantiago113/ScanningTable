@@ -60,26 +60,35 @@ class _HomeScreenState extends State<HomeScreen> {
   IOWebSocketChannel? _channel;
   StreamSubscription? _wsSub;
   bool _connecting = false;
-  String _wsStatus = 'Disconnected';
 
-  double _zoom = 1.0;
-  double _minZoom = 1.0;
-  double _maxZoom = 1.0;
+  // Zoom
+  double _zoom = 1.0;      // slider value (0.5 .. _maxZoom)
+  double _minZoom = 1.0;   // hardware min
+  double _maxZoom = 1.0;   // hardware max
+  // Removed preview-only zoom; we switch lenses for true wide when possible
 
+  // Camera
   CameraController? _camera;
   bool _cameraReady = false;
   bool _capturing = false;
+  // camera index tracking (primary chosen automatically)
+  int _primaryBackIndex = 0;
+  // (reserved) camera indices for future features
 
-  int _selectedCameraIndex = 0;
+  // Tap-to-focus UI
+  Offset? _focusUiPos;        // in preview widget coordinates
+  Timer? _focusUiTimer;
 
+  // Controls / log
   final _stopsCtrl = TextEditingController(text: '12');
   final List<String> _log = [];
-  File? _lastPhoto;
+  // Removed last photo preview to keep UI compact
 
   @override
   void initState() {
     super.initState();
-    _initCameraForIndex(_selectedCameraIndex).then((_) => _connectWs());
+    _detectBackCameras();
+    _initCameraForIndex(_primaryBackIndex).then((_) => _connectWs());
   }
 
   @override
@@ -88,6 +97,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _channel?.sink.close(ws_status.normalClosure);
     _camera?.dispose();
     _stopsCtrl.dispose();
+    _focusUiTimer?.cancel();
     super.dispose();
   }
 
@@ -99,7 +109,6 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       if (index < 0 || index >= widget.cameras.length) index = 0;
 
-      // Request permission
       final camPerm = await Permission.camera.request();
       if (!camPerm.isGranted) {
         _addLog('Camera permission not granted.');
@@ -108,11 +117,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
       final desc = widget.cameras[index];
 
-      // dispose previous controller if any
       if (_camera != null) {
-        try {
-          await _camera!.dispose();
-        } catch (_) {}
+        try { await _camera!.dispose(); } catch (_) {}
         _camera = null;
         _cameraReady = false;
       }
@@ -126,53 +132,83 @@ class _HomeScreenState extends State<HomeScreen> {
 
       await controller.initialize();
 
-      // get zoom bounds (some devices support <1.0 for wide)
       _minZoom = await controller.getMinZoomLevel();
       _maxZoom = await controller.getMaxZoomLevel();
 
-      // clamp current zoom into bounds
+      // Start at 1x if supported, otherwise min hardware
       final initialZoom = (_minZoom <= 1.0 && 1.0 <= _maxZoom) ? 1.0 : _minZoom;
       await controller.setZoomLevel(initialZoom);
 
       setState(() {
         _camera = controller;
         _cameraReady = true;
-        _zoom = initialZoom;
-        _selectedCameraIndex = index;
+        // Keep zoom-in only: start at 1.0 (or min hardware if >1.0) and clamp to max
+        final sliderMin = 1.0;
+        _zoom = initialZoom.clamp(sliderMin, _maxZoom);
       });
-      _addLog('Camera initialized (${desc.name}, lens: ${desc.lensDirection}). minZoom: ${_minZoom.toStringAsFixed(2)}, maxZoom: ${_maxZoom.toStringAsFixed(2)}');
+
+      _addLog('Camera initialized (${desc.name}, ${desc.lensDirection}). min:${_minZoom.toStringAsFixed(2)} max:${_maxZoom.toStringAsFixed(2)}');
     } catch (e) {
       _addLog('Camera init error: $e');
-      setState(() {
-        _cameraReady = false;
-      });
+      setState(() { _cameraReady = false; });
     }
   }
 
-  Future<void> _switchCamera(int index) async {
-    if (index == _selectedCameraIndex) return;
-    _addLog('Switching camera...');
-    await _initCameraForIndex(index);
+  void _detectBackCameras() {
+    // Choose primary back camera and optional ultra-wide by name hint
+    final backIdxs = <int>[];
+    for (var i = 0; i < widget.cameras.length; i++) {
+      if (widget.cameras[i].lensDirection == CameraLensDirection.back) backIdxs.add(i);
+    }
+    if (backIdxs.isEmpty) {
+      _primaryBackIndex = 0;
+      // no additional back cameras
+      return;
+    }
+    _primaryBackIndex = backIdxs.first;
+  // Heuristic detection omitted for now; primary back camera selected
   }
 
-  Future<void> _setZoom(double zoom) async {
-    if (_camera != null && _cameraReady) {
-      final clamped = zoom.clamp(_minZoom, _maxZoom);
-      try {
-        await _camera!.setZoomLevel(clamped);
-        setState(() => _zoom = clamped);
-      } catch (e) {
-        _addLog('Zoom error: $e');
-      }
+  // Simple zoom-in only: slider ranges from 1.0 to camera's max zoom and sets lens zoom.
+  Future<void> _applyZoom(double value) async {
+    if (_camera == null || !_cameraReady) return;
+    final sliderMin = 1.0;
+    value = value.clamp(sliderMin, _maxZoom);
+    try {
+      await _camera!.setZoomLevel(value);
+      setState(() { _zoom = value; });
+    } catch (e) {
+      _addLog('Zoom apply error: $e');
     }
+  }
+
+  // Tap-to-focus on the preview
+  Future<void> _focusAt(Offset localPos, Size previewSize) async {
+    if (_camera == null || !_cameraReady) return;
+    final nx = (localPos.dx / previewSize.width).clamp(0.0, 1.0);
+    final ny = (localPos.dy / previewSize.height).clamp(0.0, 1.0);
+    try {
+      await _camera!.setFocusPoint(Offset(nx, ny));
+      // Optional: also set exposure to that point
+      await _camera!.setExposurePoint(Offset(nx, ny));
+      _showFocusRing(localPos);
+      _addLog('Focus at (${nx.toStringAsFixed(2)}, ${ny.toStringAsFixed(2)})');
+    } catch (e) {
+      _addLog('Focus error: $e');
+    }
+  }
+
+  void _showFocusRing(Offset pos) {
+    _focusUiTimer?.cancel();
+    setState(() { _focusUiPos = pos; });
+    _focusUiTimer = Timer(const Duration(milliseconds: 900), () {
+      if (mounted) setState(() => _focusUiPos = null);
+    });
   }
 
   Future<void> _connectWs() async {
     if (_connecting) return;
-    setState(() {
-      _connecting = true;
-      _wsStatus = 'Connecting...';
-    });
+    setState(() { _connecting = true; });
     try {
       final channel = IOWebSocketChannel.connect(
         Uri.parse(kEspWsUrl),
@@ -180,24 +216,14 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       _wsSub = channel.stream.listen(
         (msg) => _onWsMessage(msg.toString()),
-        onDone: () {
-          _addLog('WS closed.');
-          setState(() => _wsStatus = 'Disconnected');
-        },
-        onError: (err) {
-          _addLog('WS error: $err');
-          setState(() => _wsStatus = 'Error');
-        },
+        onDone: () { _addLog('WS closed.'); },
+        onError: (err) { _addLog('WS error: $err'); },
         cancelOnError: false,
       );
-      setState(() {
-        _channel = channel;
-        _wsStatus = 'Connected';
-      });
+      setState(() { _channel = channel; });
       _addLog('Connected to $kEspWsUrl');
     } catch (e) {
       _addLog('WS connect failed: $e');
-      setState(() => _wsStatus = 'Disconnected');
     } finally {
       setState(() => _connecting = false);
     }
@@ -205,7 +231,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _onWsMessage(String msg) {
     _addLog('ESP: $msg');
-    // Expected messages: "STOP x/y", "STARTED ...", "DONE", "STOPPED"
     if (msg.startsWith('STOP ')) {
       _handleStopMessage(msg);
     } else if (msg.startsWith('DONE')) {
@@ -216,10 +241,9 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _handleStopMessage(String msg) async {
     if (!_cameraReady || _capturing) return;
     setState(() => _capturing = true);
-
     try {
       final dir = await _photosDir();
-      final stopIndex = _parseStopIndex(msg); // from "STOP 3/12"
+      final stopIndex = _parseStopIndex(msg);
       final ts = DateTime.now();
       final name = 'stop_${stopIndex?.toString().padLeft(2, '0') ?? 'x'}_${_ts(ts)}.jpg';
       final savePath = '${dir.path}${Platform.pathSeparator}$name';
@@ -228,10 +252,9 @@ class _HomeScreenState extends State<HomeScreen> {
       final XFile shot = await _camera!.takePicture();
       await File(shot.path).copy(savePath);
 
-      setState(() => _lastPhoto = File(savePath));
+  // Photo saved locally at savePath; preview omitted for compact UI
       _addLog('Saved: $name');
 
-      // Notify ESP to continue
       _send('CONTINUE');
       _addLog('Sent CONTINUE');
     } catch (e) {
@@ -242,13 +265,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   int? _parseStopIndex(String msg) {
-    // "STOP 3/12"
     try {
       final parts = msg.split(' ');
       if (parts.length < 2) return null;
       final frac = parts[1].trim();
-      final idx = int.tryParse(frac.split('/').first);
-      return idx;
+      return int.tryParse(frac.split('/').first);
     } catch (_) {
       return null;
     }
@@ -257,39 +278,28 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<Directory> _photosDir() async {
     final base = await getApplicationDocumentsDirectory();
     final dir = Directory('${base.path}${Platform.pathSeparator}ScanningTable');
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
-    }
+    if (!await dir.exists()) { await dir.create(recursive: true); }
     return dir;
   }
 
   String _ts(DateTime dt) {
     String two(int n) => n.toString().padLeft(2, '0');
     return '${dt.year}${two(dt.month)}${two(dt.day)}_${two(dt.hour)}${two(dt.minute)}${two(dt.second)}';
-    }
+  }
 
   void _addLog(String line) {
     setState(() => _log.insert(0, '${DateTime.now().toIso8601String().substring(11, 19)}  $line'));
   }
 
   void _send(String text) {
-    try {
-      _channel?.sink.add(text);
-    } catch (e) {
-      _addLog('Send error: $e');
-    }
+    try { _channel?.sink.add(text); }
+    catch (e) { _addLog('Send error: $e'); }
   }
 
   void _start() {
     final stops = int.tryParse(_stopsCtrl.text.trim());
-    if (stops == null || stops <= 0) {
-      _addLog('Invalid stops value.');
-      return;
-    }
-    if (_channel == null) {
-      _addLog('Not connected.');
-      return;
-    }
+    if (stops == null || stops <= 0) { _addLog('Invalid stops value.'); return; }
+    if (_channel == null) { _addLog('Not connected.'); return; }
     _send('START $kDefaultTurns $stops');
     _addLog('Sent START $kDefaultTurns $stops');
   }
@@ -303,7 +313,6 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        // Decorative gradient background
         Container(
           decoration: const BoxDecoration(
             gradient: LinearGradient(
@@ -313,205 +322,259 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ),
-
-        // Main content
         Scaffold(
           backgroundColor: Colors.transparent,
           body: SafeArea(
-            child: Column(
-              children: [
-                // Title BEFORE camera
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 12),
-                  child: Column(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Title (compact)
+                  Text('Scanning Table', style: Theme.of(context).textTheme.headlineLarge, textAlign: TextAlign.center),
+                  const SizedBox(height: 2),
+                  Text('ESP8266 + Camera', style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white70), textAlign: TextAlign.center),
+
+                  const SizedBox(height: 8),
+
+                  // Top area: preview (taller & narrower) on the left, logs on the right
+                  Expanded(
+                    flex: 6,
+                    child: LayoutBuilder(builder: (context, constraints) {
+                      // Make preview take ~65% of width and be tall; logs occupy remaining width
+                      // logs occupy 30% of width, preview the rest
+                      final logsWidth = constraints.maxWidth * 0.30;
+                      final previewWidth = constraints.maxWidth - logsWidth - 12;
+                      return Row(
+                        children: [
+                          SizedBox(
+                            width: previewWidth,
+                            child: _previewPane(),
+                          ),
+                          const SizedBox(width: 12),
+                          SizedBox(
+                            width: logsWidth,
+                            child: _logsPane(),
+                          ),
+                        ],
+                      );
+                    }),
+                  ),
+
+                  const SizedBox(height: 8),
+
+                  // Zoom slider row (compact)
+                  Row(
                     children: [
-                      Text('Scanning Table', style: Theme.of(context).textTheme.headlineLarge, textAlign: TextAlign.center),
-                      const SizedBox(height: 6),
-                      Text('ESP8266 + Camera Automation', style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white70), textAlign: TextAlign.center),
+                      const Icon(Icons.zoom_out, color: Colors.white),
+                      Expanded(
+                        child: Slider(
+                          value: _zoom,
+                          min: 1.0,
+                          max: _maxZoom <= 1.0 ? 4.0 : _maxZoom,
+                          divisions: 100,
+                          onChanged: (_cameraReady) ? (v) => _applyZoom(v) : null,
+                          activeColor: kPrimary,
+                          inactiveColor: Colors.white24,
+                        ),
+                      ),
+                      const Icon(Icons.zoom_in, color: Colors.white),
                     ],
                   ),
-                ),
 
-                // Camera selection and big preview
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12.0),
-                  child: Card(
-                    color: Colors.white.withOpacity(0.06),
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                    child: Column(
-                      children: [
-                        // camera selector & status
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: DropdownButton<int>(
-                                  isExpanded: true,
-                                  value: _selectedCameraIndex,
-                                  dropdownColor: Colors.white,
-                                  items: List.generate(widget.cameras.length, (i) {
-                                    final c = widget.cameras[i];
-                                    final label = '${c.name.isEmpty ? c.lensDirection.name : c.name} (${c.lensDirection.name})';
-                                    return DropdownMenuItem(value: i, child: Text(label, style: const TextStyle(color: kDark)));
-                                  }),
-                                  onChanged: (v) {
-                                    if (v != null) _switchCamera(v);
-                                  },
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Chip(
-                                backgroundColor: _cameraReady ? kPrimary.withOpacity(0.12) : Colors.orange.withOpacity(0.12),
-                                label: Text(_cameraReady ? 'Camera ready' : 'No camera', style: const TextStyle(color: Colors.white)),
-                              )
-                            ],
-                          ),
-                        ),
+                  const SizedBox(height: 8),
 
-                        // big preview area (higher height)
-                        Container(
-                          height: 420, // increased height
-                          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(12),
-                            color: Colors.black,
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(12),
-                            child: _camera != null && _cameraReady
-                                ? CameraPreview(_camera!)
-                                : Center(child: Text('Camera not available', style: TextStyle(color: Colors.white.withOpacity(0.9)))),
-                          ),
-                        ),
-
-                        // Zoom slider supporting <1.0 zoom if camera offers it
-                        if (_camera != null && _cameraReady)
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 8),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.zoom_out, color: Colors.white),
-                                Expanded(
-                                  child: Slider(
-                                    value: _zoom,
-                                    min: _minZoom,
-                                    max: _maxZoom,
-                                    divisions: 100,
-                                    label: _zoom.toStringAsFixed(2),
-                                    onChanged: (v) => _setZoom(v),
-                                  ),
-                                ),
-                                const Icon(Icons.zoom_in, color: Colors.white),
-                              ],
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-
-                // Rest of your UI (controls, logs) - scrollable
-                Expanded(
-                  child: SingleChildScrollView(
-                    child: _buildMainContent(context),
-                  ),
-                ),
-              ],
+                  // Controls card (boxed)
+                  _controlsCard(),
+                ],
+              ),
             ),
           ),
         ),
       ],
     );
   }
-
-  Widget _buildMainContent(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 700),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const SizedBox(height: 12),
-            Card(
-              color: Colors.white,
-              elevation: 6,
-              shadowColor: kDark.withOpacity(0.35),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-              child: Padding(
-                padding: const EdgeInsets.all(18.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text('Stops', style: Theme.of(context).textTheme.titleMedium),
-                    const SizedBox(height: 8),
-                    Row(
+  Widget _previewPane() {
+    return Card(
+      color: Colors.white.withOpacity(0.08),
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(10.0),
+        child: Container(
+          decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(12)),
+          clipBehavior: Clip.antiAlias,
+          child: _camera != null && _cameraReady
+              ? LayoutBuilder(
+                  builder: (context, cons) {
+                    final boxSize = Size(cons.maxWidth, cons.maxHeight);
+                    return Stack(
+                      fit: StackFit.expand,
                       children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _stopsCtrl,
-                            keyboardType: TextInputType.number,
-                            decoration: InputDecoration(
-                              filled: true,
-                              fillColor: const Color(0xFFF3F6F8),
-                              hintText: 'Enter number of stops',
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide.none,
-                              ),
-                              prefixIcon: const Icon(Icons.flag_rounded, color: kDark),
+                        Center(
+                          child: AspectRatio(
+                            // Force a portrait 9:16 preview to resemble regular camera view
+                            aspectRatio: 9 / 16,
+                            child: LayoutBuilder(
+                              builder: (ctx, inner) {
+                                final innerSize = Size(inner.maxWidth, inner.maxHeight);
+                                return GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTapDown: (d) => _focusAt(d.localPosition, innerSize),
+                                  child: CameraPreview(_camera!),
+                                );
+                              },
                             ),
-                            style: const TextStyle(fontSize: 18),
                           ),
                         ),
-                        const SizedBox(width: 12),
-                        _pillButton(
-                          label: 'Start',
-                          icon: Icons.play_arrow_rounded,
-                          color: kPrimary,
-                          onPressed: (_channel != null && !_capturing) ? _start : null,
-                        ),
+                        if (_focusUiPos != null)
+                          CustomPaint(
+                            painter: _FocusPainter(point: _focusUiPos!),
+                            size: boxSize,
+                          ),
                       ],
+                    );
+                  },
+                )
+              : const Center(child: Text('Camera not available', style: TextStyle(color: Colors.white70))),
+        ),
+      ),
+    );
+  }
+
+  
+
+  // Restored boxed controls card (compact)
+  Widget _controlsCard() {
+    return Card(
+      color: Colors.white,
+      elevation: 6,
+      shadowColor: kDark.withOpacity(0.35),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 10.0),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _stopsCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                      filled: true,
+                      fillColor: const Color(0xFFF3F6F8),
+                      hintText: 'Number of Stops',
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide.none,
+                      ),
+                      prefixIcon: const Icon(Icons.flag_rounded, color: kDark),
                     ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _pillButton(
-                            label: 'Reconnect',
-                            icon: Icons.wifi_tethering_rounded,
-                            color: kDark,
-                            onPressed: _connecting ? null : _connectWs,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _pillButton(
-                            label: 'Stop',
-                            icon: Icons.stop_rounded,
-                            color: Colors.redAccent,
-                            onPressed: _stop,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
+                    style: const TextStyle(fontSize: 16),
+                  ),
                 ),
-              ),
+                const SizedBox(width: 10),
+                _pillButton(
+                  label: 'Start',
+                  icon: Icons.play_arrow_rounded,
+                  color: kPrimary,
+                  onPressed: (_channel != null && !_capturing) ? _start : null,
+                ),
+              ],
             ),
-
-            const SizedBox(height: 18),
-
-            if (_lastPhoto != null)
-              _lastPhotoCard(),
-
-            const SizedBox(height: 12),
-
-            _logCard(),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _connecting ? null : _connectWs,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: kDark,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                    icon: const Icon(Icons.wifi_tethering_rounded),
+                    label: const Text('Reconnect'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _stop,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.redAccent,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                    icon: const Icon(Icons.stop_rounded),
+                    label: const Text('Stop'),
+                  ),
+                ),
+              ],
+            ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _logsPane() {
+    // Convert recent logs into boolean statuses for icon indicators
+    final connected = _channel != null;
+    final cameraOk = _cameraReady;
+  final busy = _capturing;
+    final sentStart = _log.any((l) => l.contains('Sent START'));
+    final saved = _log.any((l) => l.contains('Saved:'));
+    final hasError = _log.any((l) => l.toLowerCase().contains('error'));
+    final focused = _log.any((l) => l.contains('Focus at'));
+
+    Widget statusIconWithText(IconData icon, String label, bool on) {
+      final bg = on ? kDark : Colors.white24;
+      final fg = on ? Colors.white : Colors.white70;
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Tooltip(
+            message: label,
+            child: Container(
+              width: 28,
+              height: 28,
+              margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
+              child: CircleAvatar(
+                backgroundColor: bg,
+                radius: 12,
+                child: Icon(icon, color: fg, size: 13),
+              ),
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(label, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w400)),
+        ],
+      );
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      padding: const EdgeInsets.fromLTRB(8, 10, 8, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          // icons stacked vertically with text below
+          statusIconWithText(Icons.wifi, 'Connected to ESP', connected),
+          statusIconWithText(Icons.photo_camera, 'Camera Ready', cameraOk),
+          statusIconWithText(Icons.play_arrow, 'Sequence Started', sentStart),
+          statusIconWithText(Icons.camera_alt, 'Photo Captured', saved),
+          statusIconWithText(Icons.center_focus_strong, 'Focused', focused),
+          statusIconWithText(Icons.hourglass_bottom, 'Capturing', busy),
+          statusIconWithText(Icons.error_outline, 'Error', hasError),
+        ],
       ),
     );
   }
@@ -530,62 +593,29 @@ class _HomeScreenState extends State<HomeScreen> {
       label: Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
     );
   }
+}
 
-  Widget _lastPhotoCard() {
-    return Card(
-      color: Colors.white,
-      elevation: 5,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(14.0),
-        child: Row(
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: Image.file(_lastPhoto!, width: 90, height: 90, fit: BoxFit.cover),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Last Capture', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
-                  const SizedBox(height: 4),
-                  FutureBuilder<Directory>(
-                    future: _photosDir(),
-                    builder: (context, snap) {
-                      final p = _lastPhoto?.path ?? '';
-                      return Text(
-                        p.split(Platform.pathSeparator).last,
-                        style: const TextStyle(color: kDark),
-                        overflow: TextOverflow.ellipsis,
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+// Simple focus ring painter
+class _FocusPainter extends CustomPainter {
+  final Offset point;
+  _FocusPainter({required this.point});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final p = point;
+    final paint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    const r = 28.0;
+    canvas.drawCircle(p, r, paint);
+    // small crosshair
+    canvas.drawLine(Offset(p.dx - r, p.dy), Offset(p.dx - r / 2, p.dy), paint);
+    canvas.drawLine(Offset(p.dx + r / 2, p.dy), Offset(p.dx + r, p.dy), paint);
+    canvas.drawLine(Offset(p.dx, p.dy - r), Offset(p.dx, p.dy - r / 2), paint);
+    canvas.drawLine(Offset(p.dx, p.dy + r / 2), Offset(p.dx, p.dy + r), paint);
   }
 
-  Widget _logCard() {
-    return Card(
-      color: Colors.white,
-      elevation: 4,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Container(
-        constraints: const BoxConstraints(maxHeight: 220),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        child: ListView.separated(
-          reverse: true,
-          itemCount: _log.length,
-          separatorBuilder: (_, __) => const Divider(height: 8),
-          itemBuilder: (_, i) => Text(_log[i], style: const TextStyle(fontFamily: 'Montserrat')),
-        ),
-      ),
-    );
-  }
+  @override
+  bool shouldRepaint(covariant _FocusPainter oldDelegate) => oldDelegate.point != point;
 }
