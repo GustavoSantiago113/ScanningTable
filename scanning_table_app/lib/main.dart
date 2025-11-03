@@ -59,12 +59,18 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   IOWebSocketChannel? _channel;
   StreamSubscription? _wsSub;
-  String _wsStatus = 'Disconnected';
   bool _connecting = false;
+  String _wsStatus = 'Disconnected';
+
+  double _zoom = 1.0;
+  double _minZoom = 1.0;
+  double _maxZoom = 1.0;
 
   CameraController? _camera;
   bool _cameraReady = false;
   bool _capturing = false;
+
+  int _selectedCameraIndex = 0;
 
   final _stopsCtrl = TextEditingController(text: '12');
   final List<String> _log = [];
@@ -73,8 +79,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _initCamera();
-    _connectWs();
+    _initCameraForIndex(_selectedCameraIndex).then((_) => _connectWs());
   }
 
   @override
@@ -86,39 +91,79 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  Future<void> _initCamera() async {
+  Future<void> _initCameraForIndex(int index) async {
     try {
       if (widget.cameras.isEmpty) {
         _addLog('No cameras found.');
         return;
       }
+      if (index < 0 || index >= widget.cameras.length) index = 0;
+
       // Request permission
       final camPerm = await Permission.camera.request();
       if (!camPerm.isGranted) {
         _addLog('Camera permission not granted.');
         return;
       }
-      final back = widget.cameras.firstWhere(
-        (c) => c.lensDirection == CameraLensDirection.back,
-        orElse: () => widget.cameras.first,
-      );
+
+      final desc = widget.cameras[index];
+
+      // dispose previous controller if any
+      if (_camera != null) {
+        try {
+          await _camera!.dispose();
+        } catch (_) {}
+        _camera = null;
+        _cameraReady = false;
+      }
+
       final controller = CameraController(
-        back,
+        desc,
         ResolutionPreset.medium,
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.jpeg,
       );
+
       await controller.initialize();
+
+      // get zoom bounds (some devices support <1.0 for wide)
+      _minZoom = await controller.getMinZoomLevel();
+      _maxZoom = await controller.getMaxZoomLevel();
+
+      // clamp current zoom into bounds
+      final initialZoom = (_minZoom <= 1.0 && 1.0 <= _maxZoom) ? 1.0 : _minZoom;
+      await controller.setZoomLevel(initialZoom);
+
       setState(() {
         _camera = controller;
         _cameraReady = true;
+        _zoom = initialZoom;
+        _selectedCameraIndex = index;
       });
-      _addLog('Camera initialized.');
+      _addLog('Camera initialized (${desc.name}, lens: ${desc.lensDirection}). minZoom: ${_minZoom.toStringAsFixed(2)}, maxZoom: ${_maxZoom.toStringAsFixed(2)}');
     } catch (e) {
       _addLog('Camera init error: $e');
       setState(() {
         _cameraReady = false;
       });
+    }
+  }
+
+  Future<void> _switchCamera(int index) async {
+    if (index == _selectedCameraIndex) return;
+    _addLog('Switching camera...');
+    await _initCameraForIndex(index);
+  }
+
+  Future<void> _setZoom(double zoom) async {
+    if (_camera != null && _cameraReady) {
+      final clamped = zoom.clamp(_minZoom, _maxZoom);
+      try {
+        await _camera!.setZoomLevel(clamped);
+        setState(() => _zoom = clamped);
+      } catch (e) {
+        _addLog('Zoom error: $e');
+      }
     }
   }
 
@@ -164,7 +209,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (msg.startsWith('STOP ')) {
       _handleStopMessage(msg);
     } else if (msg.startsWith('DONE')) {
-      // Sequence completed
+      _addLog('Sequence finished by ESP.');
     }
   }
 
@@ -228,7 +273,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _send(String text) {
-    _channel?.sink.add(text);
+    try {
+      _channel?.sink.add(text);
+    } catch (e) {
+      _addLog('Send error: $e');
+    }
   }
 
   void _start() {
@@ -269,141 +318,201 @@ class _HomeScreenState extends State<HomeScreen> {
         Scaffold(
           backgroundColor: Colors.transparent,
           body: SafeArea(
-            child: Center(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 700),
+            child: Column(
+              children: [
+                // Title BEFORE camera
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 12),
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      const SizedBox(height: 12),
                       Text('Scanning Table', style: Theme.of(context).textTheme.headlineLarge, textAlign: TextAlign.center),
                       const SizedBox(height: 6),
                       Text('ESP8266 + Camera Automation', style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white70), textAlign: TextAlign.center),
-                      const SizedBox(height: 24),
-
-                      _statusChips(),
-
-                      const SizedBox(height: 18),
-
-                      Card(
-                        color: Colors.white,
-                        elevation: 6,
-                        shadowColor: kDark.withOpacity(0.35),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-                        child: Padding(
-                          padding: const EdgeInsets.all(18.0),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              Text('Stops', style: Theme.of(context).textTheme.titleMedium),
-                              const SizedBox(height: 8),
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: TextField(
-                                      controller: _stopsCtrl,
-                                      keyboardType: TextInputType.number,
-                                      decoration: InputDecoration(
-                                        filled: true,
-                                        fillColor: const Color(0xFFF3F6F8),
-                                        hintText: 'Enter number of stops',
-                                        border: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(12),
-                                          borderSide: BorderSide.none,
-                                        ),
-                                        prefixIcon: const Icon(Icons.flag_rounded, color: kDark),
-                                      ),
-                                      style: const TextStyle(fontSize: 18),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  _pillButton(
-                                    label: 'Start',
-                                    icon: Icons.play_arrow_rounded,
-                                    color: kPrimary,
-                                    onPressed: (_channel != null && !_capturing) ? _start : null,
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 12),
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: _pillButton(
-                                      label: 'Reconnect',
-                                      icon: Icons.wifi_tethering_rounded,
-                                      color: kDark,
-                                      onPressed: _connecting ? null : _connectWs,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: _pillButton(
-                                      label: 'Stop',
-                                      icon: Icons.stop_rounded,
-                                      color: Colors.redAccent,
-                                      onPressed: _stop,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-
-                      const SizedBox(height: 18),
-
-                      if (_lastPhoto != null)
-                        _lastPhotoCard(),
-
-                      const SizedBox(height: 12),
-
-                      _logCard(),
                     ],
                   ),
                 ),
-              ),
+
+                // Camera selection and big preview
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12.0),
+                  child: Card(
+                    color: Colors.white.withOpacity(0.06),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    child: Column(
+                      children: [
+                        // camera selector & status
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: DropdownButton<int>(
+                                  isExpanded: true,
+                                  value: _selectedCameraIndex,
+                                  dropdownColor: Colors.white,
+                                  items: List.generate(widget.cameras.length, (i) {
+                                    final c = widget.cameras[i];
+                                    final label = '${c.name.isEmpty ? c.lensDirection.name : c.name} (${c.lensDirection.name})';
+                                    return DropdownMenuItem(value: i, child: Text(label, style: const TextStyle(color: kDark)));
+                                  }),
+                                  onChanged: (v) {
+                                    if (v != null) _switchCamera(v);
+                                  },
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Chip(
+                                backgroundColor: _cameraReady ? kPrimary.withOpacity(0.12) : Colors.orange.withOpacity(0.12),
+                                label: Text(_cameraReady ? 'Camera ready' : 'No camera', style: const TextStyle(color: Colors.white)),
+                              )
+                            ],
+                          ),
+                        ),
+
+                        // big preview area (higher height)
+                        Container(
+                          height: 420, // increased height
+                          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(12),
+                            color: Colors.black,
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: _camera != null && _cameraReady
+                                ? CameraPreview(_camera!)
+                                : Center(child: Text('Camera not available', style: TextStyle(color: Colors.white.withOpacity(0.9)))),
+                          ),
+                        ),
+
+                        // Zoom slider supporting <1.0 zoom if camera offers it
+                        if (_camera != null && _cameraReady)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 8),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.zoom_out, color: Colors.white),
+                                Expanded(
+                                  child: Slider(
+                                    value: _zoom,
+                                    min: _minZoom,
+                                    max: _maxZoom,
+                                    divisions: 100,
+                                    label: _zoom.toStringAsFixed(2),
+                                    onChanged: (v) => _setZoom(v),
+                                  ),
+                                ),
+                                const Icon(Icons.zoom_in, color: Colors.white),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+
+                // Rest of your UI (controls, logs) - scrollable
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: _buildMainContent(context),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
+      ],
+    );
+  }
 
-        // Keep a hidden camera preview so controller stays active
-        if (_camera != null && _cameraReady)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: Opacity(
-                opacity: 0.0001,
-                child: CameraPreview(_camera!),
+  Widget _buildMainContent(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 700),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const SizedBox(height: 12),
+            Card(
+              color: Colors.white,
+              elevation: 6,
+              shadowColor: kDark.withOpacity(0.35),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              child: Padding(
+                padding: const EdgeInsets.all(18.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text('Stops', style: Theme.of(context).textTheme.titleMedium),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _stopsCtrl,
+                            keyboardType: TextInputType.number,
+                            decoration: InputDecoration(
+                              filled: true,
+                              fillColor: const Color(0xFFF3F6F8),
+                              hintText: 'Enter number of stops',
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide.none,
+                              ),
+                              prefixIcon: const Icon(Icons.flag_rounded, color: kDark),
+                            ),
+                            style: const TextStyle(fontSize: 18),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        _pillButton(
+                          label: 'Start',
+                          icon: Icons.play_arrow_rounded,
+                          color: kPrimary,
+                          onPressed: (_channel != null && !_capturing) ? _start : null,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _pillButton(
+                            label: 'Reconnect',
+                            icon: Icons.wifi_tethering_rounded,
+                            color: kDark,
+                            onPressed: _connecting ? null : _connectWs,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _pillButton(
+                            label: 'Stop',
+                            icon: Icons.stop_rounded,
+                            color: Colors.redAccent,
+                            onPressed: _stop,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-      ],
-    );
-  }
 
-  Widget _statusChips() {
-    return Wrap(
-      spacing: 10,
-      runSpacing: 10,
-      alignment: WrapAlignment.center,
-      children: [
-        _chip(icon: Icons.wifi_rounded, label: _wsStatus, color: _wsStatus == 'Connected' ? kPrimary : Colors.orange),
-        _chip(icon: Icons.photo_camera_rounded, label: _cameraReady ? 'Camera ready' : 'Camera not ready', color: _cameraReady ? kPrimary : Colors.orange),
-        _chip(icon: Icons.tune_rounded, label: 'Turns: $kDefaultTurns', color: kDark),
-      ],
-    );
-  }
+            const SizedBox(height: 18),
 
-  Widget _chip({required IconData icon, required String label, required Color color}) {
-    return Chip(
-      avatar: CircleAvatar(backgroundColor: color, child: Icon(icon, size: 16, color: Colors.white)),
-      label: Text(label, style: const TextStyle(color: Colors.white)),
-      backgroundColor: color.withOpacity(0.2),
-      shape: StadiumBorder(side: BorderSide(color: color.withOpacity(0.6))),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            if (_lastPhoto != null)
+              _lastPhotoCard(),
+
+            const SizedBox(height: 12),
+
+            _logCard(),
+          ],
+        ),
+      ),
     );
   }
 
