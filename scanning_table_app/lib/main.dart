@@ -60,6 +60,13 @@ class _HomeScreenState extends State<HomeScreen> {
   IOWebSocketChannel? _channel;
   StreamSubscription? _wsSub;
   bool _connecting = false;
+  // Track whether a capture sequence is considered started (controls status icon)
+  bool _sequenceStarted = false;
+  // Whether the ESP sent the initial CONNECTED welcome message
+  bool _espConnected = false;
+  // Raw last WS traffic for debug overlay
+  String? _lastSent;
+  String? _lastReceived;
 
   // Zoom
   double _zoom = 1.0;      // slider value (0.5 .. _maxZoom)
@@ -216,8 +223,22 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       _wsSub = channel.stream.listen(
         (msg) => _onWsMessage(msg.toString()),
-        onDone: () { _addLog('WS closed.'); },
-        onError: (err) { _addLog('WS error: $err'); },
+        onDone: () {
+          setState(() {
+            _channel = null;
+            _sequenceStarted = false;
+            _espConnected = false;
+          });
+          _addLog('WS closed.');
+        },
+        onError: (err) {
+          setState(() {
+            _channel = null;
+            _sequenceStarted = false;
+            _espConnected = false;
+          });
+          _addLog('WS error: $err');
+        },
         cancelOnError: false,
       );
       setState(() { _channel = channel; });
@@ -231,9 +252,16 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _onWsMessage(String msg) {
     _addLog('ESP: $msg');
+    setState(() { _lastReceived = msg; });
+    // Mark connected when the ESP sends its welcome message
+    if (msg.startsWith('CONNECTED')) {
+      setState(() { _espConnected = true; });
+      return;
+    }
     if (msg.startsWith('STOP ')) {
       _handleStopMessage(msg);
     } else if (msg.startsWith('DONE')) {
+      setState(() { _sequenceStarted = false; });
       _addLog('Sequence finished by ESP.');
     }
   }
@@ -292,7 +320,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _send(String text) {
-    try { _channel?.sink.add(text); }
+    try {
+      _channel?.sink.add('$text\n');
+      setState(() { _lastSent = text; });
+    }
     catch (e) { _addLog('Send error: $e'); }
   }
 
@@ -302,11 +333,13 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_channel == null) { _addLog('Not connected.'); return; }
     _send('START $kDefaultTurns $stops');
     _addLog('Sent START $kDefaultTurns $stops');
+    setState(() { _sequenceStarted = true; });
   }
 
   void _stop() {
     _send('STOP');
     _addLog('Sent STOP');
+    setState(() { _sequenceStarted = false; });
   }
 
   @override
@@ -522,11 +555,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _logsPane() {
-    // Convert recent logs into boolean statuses for icon indicators
-    final connected = _channel != null;
+  // Convert recent logs into boolean statuses for icon indicators
+  // Use the ESP welcome message to mark 'connected' so the icon only lights
+  // when the ESP acknowledges the socket (some sketches require this handshake).
+  final connected = _espConnected;
     final cameraOk = _cameraReady;
   final busy = _capturing;
-    final sentStart = _log.any((l) => l.contains('Sent START'));
+  final sentStart = _sequenceStarted;
     final saved = _log.any((l) => l.contains('Saved:'));
     final hasError = _log.any((l) => l.toLowerCase().contains('error'));
     final focused = _log.any((l) => l.contains('Focus at'));
@@ -574,6 +609,12 @@ class _HomeScreenState extends State<HomeScreen> {
           statusIconWithText(Icons.center_focus_strong, 'Focused', focused),
           statusIconWithText(Icons.hourglass_bottom, 'Capturing', busy),
           statusIconWithText(Icons.error_outline, 'Error', hasError),
+          const SizedBox(height: 8),
+          // Raw WS debug lines (short)
+          if (_lastSent != null)
+            Text('Last sent: ${_lastSent!.length > 40 ? '${_lastSent!.substring(0,40)}...' : _lastSent}', style: const TextStyle(color: Colors.white70, fontSize: 10)),
+          if (_lastReceived != null)
+            Text('Last recv: ${_lastReceived!.length > 40 ? '${_lastReceived!.substring(0,40)}...' : _lastReceived}', style: const TextStyle(color: Colors.white70, fontSize: 10)),
         ],
       ),
     );
