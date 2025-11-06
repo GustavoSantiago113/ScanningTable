@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
-#include <WebSocketsServer.h>
+#include <ESP8266WebServer.h>
 #include <Stepper.h>
 
 // --- Wi-Fi Access Point ---
@@ -15,8 +15,8 @@ const char* password = "12345678";
 #define STEPS_PER_REV 2048
 Stepper stepper(STEPS_PER_REV, IN1, IN3, IN2, IN4);
 
-// --- WebSocket Server ---
-WebSocketsServer webSocket = WebSocketsServer(81);  // Port 81 for WS
+// --- HTTP Server ---
+ESP8266WebServer server(80);
 
 // --- Motor control state ---
 bool running = false;
@@ -24,6 +24,19 @@ bool waitingForContinue = false;
 int totalStops = 0;
 int currentStop = 0;
 long stepsPerStop = 0;
+
+// --- Helpers ---
+void sendJson(const String &json, int code = 200) {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  server.send(code, "application/json", json);
+}
+
+void sendOk(const String &msg = "OK") {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "text/plain", msg);
+}
 
 void moveOneSegment() {
   if (!running) return;
@@ -33,16 +46,11 @@ void moveOneSegment() {
     currentStop++;
     Serial.printf("Reached stop %d/%d\n", currentStop, totalStops);
 
-    // Notify app that we stopped
-    String msg = "STOP " + String(currentStop) + "/" + String(totalStops);
-    webSocket.broadcastTXT(msg);
-
-    // Wait for CONTINUE command from the app
+    // Notify app via status polling (waitingForContinue)
     waitingForContinue = true;
   } else {
     running = false;
     waitingForContinue = false;
-    webSocket.broadcastTXT("DONE");
     Serial.println("Sequence complete.");
   }
 }
@@ -66,70 +74,52 @@ void performSteps(long nsteps) {
   }
 }
 
-// --- Handle incoming WebSocket messages ---
-void handleMessage(uint8_t num, String payload) {
-  payload.trim();
-  Serial.printf("[WS %u] Received: %s\n", num, payload.c_str());
+// --- HTTP Handlers ---
+void handleStatus() {
+  String json = "{";
+  json += "\"running\":" + String(running ? "true" : "false") + ",";
+  json += "\"waitingForContinue\":" + String(waitingForContinue ? "true" : "false") + ",";
+  json += "\"currentStop\":" + String(currentStop) + ",";
+  json += "\"totalStops\":" + String(totalStops) + "}";
+  sendJson(json);
+}
 
-  if (payload.startsWith("START")) {
-    // Format: START <turns> <stops>
-    int turns, stops;
-    int n = sscanf(payload.c_str(), "START %d %d", &turns, &stops);
-    if (n == 2 && turns > 0 && stops > 0) {
-      long totalSteps = STEPS_PER_REV * turns;
-      stepsPerStop = totalSteps / stops;
-      totalStops = stops;
-      currentStop = 0;
-      running = true;
-      waitingForContinue = false;
+void handleStart() {
+  int turns = 0;
+  int stops = 0;
+  if (server.hasArg("turns")) turns = server.arg("turns").toInt();
+  if (server.hasArg("stops")) stops = server.arg("stops").toInt();
 
-      String startedMsg = "STARTED " + String(turns) + " turns, " + String(stops) + " stops";
-      webSocket.broadcastTXT(startedMsg);
-      moveOneSegment();
-    } else {
-      webSocket.sendTXT(num, "ERROR Invalid START command. Use: START <turns> <stops>");
-    }
-  }
-
-  else if (payload.equalsIgnoreCase("CONTINUE")) {
-    if (running && waitingForContinue) {
-      waitingForContinue = false;
-      moveOneSegment();
-    } else {
-      webSocket.sendTXT(num, "IGNORED CONTINUE (not waiting)");
-    }
-  }
-
-  else if (payload.equalsIgnoreCase("STOP")) {
-    running = false;
+  if (turns > 0 && stops > 0) {
+    long totalSteps = STEPS_PER_REV * turns;
+    stepsPerStop = totalSteps / stops;
+    totalStops = stops;
+    currentStop = 0;
+    running = true;
     waitingForContinue = false;
-    webSocket.broadcastTXT("STOPPED");
-    Serial.println("Manual stop triggered.");
-  }
-
-  else {
-    webSocket.sendTXT(num, "UNKNOWN COMMAND");
+    Serial.printf("START %d turns, %d stops (stepsPerStop=%ld)\n", turns, stops, stepsPerStop);
+    sendOk("STARTED");
+    moveOneSegment();
+  } else {
+    server.send(400, "text/plain", "Invalid args. Use POST /start?turns=<n>&stops=<m>");
   }
 }
 
-// --- WebSocket event callback ---
-void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t length) {
-  switch (type) {
-    case WStype_CONNECTED: {
-      IPAddress ip = webSocket.remoteIP(num);
-      Serial.printf("Client %u connected from %s\n", num, ip.toString().c_str());
-      webSocket.sendTXT(num, "CONNECTED to ESP_Motor_WS");
-      break;
-    }
-    case WStype_DISCONNECTED:
-      Serial.printf("Client %u disconnected\n", num);
-      break;
-    case WStype_TEXT:
-      handleMessage(num, String((char*)payload));
-      break;
-    default:
-      break;
+void handleContinue() {
+  if (running && waitingForContinue) {
+    waitingForContinue = false;
+    sendOk("CONTINUING");
+    moveOneSegment();
+  } else {
+    server.send(409, "text/plain", "Not waiting for continue");
   }
+}
+
+void handleStop() {
+  running = false;
+  waitingForContinue = false;
+  Serial.println("Manual stop triggered.");
+  sendOk("STOPPED");
 }
 
 void setup() {
@@ -143,15 +133,18 @@ void setup() {
   Serial.println();
   Serial.print("Access Point: "); Serial.println(ssid);
   Serial.print("Password: "); Serial.println(password);
-  Serial.print("Connect via: ws://"); Serial.print(IP); Serial.println(":81");
+  Serial.print("Connect via HTTP: http://"); Serial.print(IP); Serial.println("/");
 
-  // Start WebSocket server
-  webSocket.begin();
-  webSocket.onEvent(onWebSocketEvent);
-
-  Serial.println("WebSocket server started!");
+  // Start HTTP server
+  server.on("/status", HTTP_GET, handleStatus);
+  server.on("/start", HTTP_POST, handleStart);
+  server.on("/continue", HTTP_POST, handleContinue);
+  server.on("/stop", HTTP_POST, handleStop);
+  server.onNotFound([](){ server.send(404, "text/plain", "Not Found"); });
+  server.begin();
+  Serial.println("HTTP server started!");
 }
 
 void loop() {
-  webSocket.loop();
+  server.handleClient();
 }

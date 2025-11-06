@@ -15,7 +15,7 @@
   </style>
 </head>
 <body>
-  <h2>ESP8266 Stepper Motor WebSocket Control</h2>
+  <h2>ESP8266 Stepper Motor HTTP Control</h2>
 
   <input type="number" id="turns" value="6" min="1" style="width:60px;"> turns<br>
   <input type="number" id="stops" value="12" min="1" style="width:60px;"> stops<br><br>
@@ -23,6 +23,7 @@
   <button onclick="sendStart()">Start</button>
   <button onclick="sendContinue()">Continue</button>
   <button onclick="sendStop()">Stop</button>
+  <button onclick="pollStatus()">Poll Status</button>
 
   <div id="log"></div>
 
@@ -33,28 +34,36 @@
       logDiv.scrollTop = logDiv.scrollHeight;
     }
 
-    const ws = new WebSocket("ws://192.168.4.1:81");
-
-    ws.onopen = () => log("✅ Connected to ESP8266");
-    ws.onmessage = (event) => log("📩 " + event.data);
-    ws.onclose = () => log("❌ Disconnected");
-    ws.onerror = (err) => log("⚠️ WebSocket error: " + err);
+    const baseUrl = "http://192.168.4.1";
 
     function sendStart() {
       const turns = document.getElementById("turns").value;
       const stops = document.getElementById("stops").value;
-      ws.send(`START ${turns} ${stops}`);
-      log(`➡️ Sent: START ${turns} ${stops}`);
+      fetch(`${baseUrl}/start?turns=${turns}&stops=${stops}`, { method: "POST" })
+        .then(r => r.text())
+        .then(txt => log(`➡️ Sent: START ${turns} ${stops}<br>Response: ${txt}`))
+        .catch(e => log(`❌ Error: ${e}`));
     }
 
     function sendContinue() {
-      ws.send("CONTINUE");
-      log("➡️ Sent: CONTINUE");
+      fetch(`${baseUrl}/continue`, { method: "POST" })
+        .then(r => r.text())
+        .then(txt => log(`➡️ Sent: CONTINUE<br>Response: ${txt}`))
+        .catch(e => log(`❌ Error: ${e}`));
     }
 
     function sendStop() {
-      ws.send("STOP");
-      log("➡️ Sent: STOP");
+      fetch(`${baseUrl}/stop`, { method: "POST" })
+        .then(r => r.text())
+        .then(txt => log(`➡️ Sent: STOP<br>Response: ${txt}`))
+        .catch(e => log(`❌ Error: ${e}`));
+    }
+
+    function pollStatus() {
+      fetch(`${baseUrl}/status`)
+        .then(r => r.json())
+        .then(json => log(`📊 Status: ${JSON.stringify(json)}`))
+        .catch(e => log(`❌ Error: ${e}`));
     }
   </script>
 </body>

@@ -1,17 +1,17 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:convert';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:web_socket_channel/io.dart';
-import 'package:web_socket_channel/status.dart' as ws_status;
+import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 import '../components/components.dart';
 
 import '../main.dart' show kPrimary, kDark;
 
 const int kDefaultTurns = 6;
-const String kEspWsUrl = 'ws://192.168.4.1:81';
+const String kEspBaseUrl = 'http://192.168.4.1';
 
 class HomeScreen extends StatefulWidget {
 	final List<CameraDescription> cameras;
@@ -22,8 +22,6 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-	IOWebSocketChannel? _channel;
-	StreamSubscription? _wsSub;
 	bool _connecting = false;
 	bool _sequenceStarted = false;
 	bool _espConnected = false;
@@ -45,13 +43,15 @@ class _HomeScreenState extends State<HomeScreen> {
 	void initState() {
 		super.initState();
 		_detectBackCameras();
-		_initCameraForIndex(_primaryBackIndex).then((_) => _connectWs());
+		_initCameraForIndex(_primaryBackIndex).then((_) => _ping());
 	}
+
+	Timer? _pollTimer;
+	int _lastProcessedStop = 0; // to avoid double-processing same stop
 
 	@override
 	void dispose() {
-		_wsSub?.cancel();
-		_channel?.sink.close(ws_status.normalClosure);
+		_pollTimer?.cancel();
 		_camera?.dispose();
 		_stopsCtrl.dispose();
 		_focusUiTimer?.cancel();
@@ -146,88 +146,24 @@ class _HomeScreenState extends State<HomeScreen> {
 		});
 	}
 
-	Future<void> _connectWs() async {
-		if (_connecting) return;
-		setState(() { _connecting = true; });
-		try {
-			final channel = IOWebSocketChannel.connect(
-				Uri.parse(kEspWsUrl),
-				pingInterval: const Duration(seconds: 10),
-			);
-			_wsSub = channel.stream.listen(
-				(msg) => _onWsMessage(msg.toString()),
-				onDone: () {
-					setState(() {
-						_channel = null;
-						_sequenceStarted = false;
-						_espConnected = false;
-					});
-					_addLog('WS closed.');
-				},
-				onError: (err) {
-					setState(() {
-						_channel = null;
-						_sequenceStarted = false;
-						_espConnected = false;
-					});
-					_addLog('WS error: $err');
-				},
-				cancelOnError: false,
-			);
-			setState(() { _channel = channel; });
-			_addLog('Connected to $kEspWsUrl');
-		} catch (e) {
-			_addLog('WS connect failed: $e');
-		} finally {
-			setState(() => _connecting = false);
-		}
-	}
-
-	void _onWsMessage(String msg) {
-		_addLog('ESP: $msg');
-		setState(() { _lastReceived = msg; });
-		if (msg.startsWith('CONNECTED')) {
-			setState(() { _espConnected = true; });
-			return;
-		}
-		if (msg.startsWith('STOP ')) {
-			_handleStopMessage(msg);
-		} else if (msg.startsWith('DONE')) {
-			setState(() { _sequenceStarted = false; });
-			_addLog('Sequence finished by ESP.');
-		}
-	}
-
-	Future<void> _handleStopMessage(String msg) async {
+	Future<void> _handleStopEvent(int stopIndex) async {
 		if (!_cameraReady || _capturing) return;
 		setState(() => _capturing = true);
 		try {
 			final dir = await _photosDir();
-			final stopIndex = _parseStopIndex(msg);
 			final ts = DateTime.now();
-			final name = 'stop_${stopIndex?.toString().padLeft(2, '0') ?? 'x'}_${_ts(ts)}.jpg';
+			final name = 'stop_${stopIndex.toString().padLeft(2, '0')}_${_ts(ts)}.jpg';
 			final savePath = '${dir.path}${Platform.pathSeparator}$name';
 			_addLog('Capturing photo...');
 			final XFile shot = await _camera!.takePicture();
 			await File(shot.path).copy(savePath);
 			_addLog('Saved: $name');
-			_send('CONTINUE');
+			await _httpContinue();
 			_addLog('Sent CONTINUE');
 		} catch (e) {
 			_addLog('Capture error: $e');
 		} finally {
 			setState(() => _capturing = false);
-		}
-	}
-
-	int? _parseStopIndex(String msg) {
-		try {
-			final parts = msg.split(' ');
-			if (parts.length < 2) return null;
-			final frac = parts[1].trim();
-			return int.tryParse(frac.split('/').first);
-		} catch (_) {
-			return null;
 		}
 	}
 
@@ -247,27 +183,96 @@ class _HomeScreenState extends State<HomeScreen> {
 		setState(() => _log.insert(0, '${DateTime.now().toIso8601String().substring(11, 19)}  $line'));
 	}
 
-	void _send(String text) {
-		try {
-			_channel?.sink.add('$text\n');
-			setState(() { _lastSent = text; });
-		}
-		catch (e) { _addLog('Send error: $e'); }
-	}
-
 	void _start() {
 		final stops = int.tryParse(_stopsCtrl.text.trim());
 		if (stops == null || stops <= 0) { _addLog('Invalid stops value.'); return; }
-		if (_channel == null) { _addLog('Not connected.'); return; }
-		_send('START $kDefaultTurns $stops');
-		_addLog('Sent START $kDefaultTurns $stops');
-		setState(() { _sequenceStarted = true; });
+		_httpStart(kDefaultTurns, stops);
 	}
 
 	void _stop() {
-		_send('STOP');
-		_addLog('Sent STOP');
-		setState(() { _sequenceStarted = false; });
+		_httpStop();
+	}
+
+	// ------------------ HTTP layer ------------------
+	Uri _uri(String path, [Map<String, String>? q]) => Uri.parse('$kEspBaseUrl$path').replace(queryParameters: q);
+
+	Future<void> _httpStart(int turns, int stops) async {
+		try {
+			setState(() { _sequenceStarted = true; _lastProcessedStop = 0; });
+			final resp = await http.post(_uri('/start', { 'turns': '$turns', 'stops': '$stops' })).timeout(const Duration(seconds: 3));
+			_addLog('HTTP /start => ${resp.statusCode} ${resp.body}');
+			setState(() { _espConnected = resp.statusCode == 200; _lastSent = 'START $turns $stops'; });
+			_startPolling();
+		} catch (e) {
+			_addLog('HTTP start failed: $e');
+			setState(() { _sequenceStarted = false; _espConnected = false; });
+		}
+	}
+
+	Future<void> _httpStop() async {
+		try {
+			final resp = await http.post(_uri('/stop')).timeout(const Duration(seconds: 3));
+			_addLog('HTTP /stop => ${resp.statusCode}');
+			setState(() { _sequenceStarted = false; _lastSent = 'STOP'; });
+		} catch (e) {
+			_addLog('HTTP stop failed: $e');
+		}
+	}
+
+	Future<void> _httpContinue() async {
+		try {
+			final resp = await http.post(_uri('/continue')).timeout(const Duration(seconds: 3));
+			_addLog('HTTP /continue => ${resp.statusCode}');
+			setState(() { _lastSent = 'CONTINUE'; });
+		} catch (e) {
+			_addLog('HTTP continue failed: $e');
+		}
+	}
+
+	Future<void> _ping() async {
+		if (_connecting) return;
+		setState(() { _connecting = true; });
+		try {
+			final resp = await http.get(_uri('/status')).timeout(const Duration(seconds: 2));
+			setState(() { _espConnected = resp.statusCode == 200; _lastReceived = resp.body; });
+			_addLog('HTTP /status => ${resp.statusCode}');
+		} catch (e) {
+			setState(() { _espConnected = false; });
+            _addLog('Ping failed: ${e.runtimeType}: $e');
+		} finally {
+			setState(() { _connecting = false; });
+		}
+	}
+
+	void _startPolling() {
+		_pollTimer?.cancel();
+		_pollTimer = Timer.periodic(const Duration(milliseconds: 400), (_) async {
+			try {
+				final resp = await http.get(_uri('/status')).timeout(const Duration(seconds: 2));
+				if (resp.statusCode != 200) return;
+				final data = jsonDecode(resp.body) as Map<String, dynamic>;
+				final running = data['running'] == true;
+				final waiting = data['waitingForContinue'] == true;
+				final current = (data['currentStop'] ?? 0) as int;
+				final total = (data['totalStops'] ?? 0) as int;
+				setState(() {
+					_espConnected = true;
+					_sequenceStarted = running;
+					_lastReceived = resp.body;
+				});
+				if (waiting && current > _lastProcessedStop) {
+					_lastProcessedStop = current;
+					await _handleStopEvent(current);
+				}
+				if (!running && total > 0 && current >= total) {
+					_addLog('Sequence finished by ESP.');
+					_pollTimer?.cancel();
+					setState(() { _sequenceStarted = false; });
+				}
+			} catch (_) {
+				// ignore transient errors while polling
+			}
+		});
 	}
 
 	@override
@@ -425,7 +430,7 @@ class _HomeScreenState extends State<HomeScreen> {
 									label: 'Start',
 									icon: Icons.play_arrow_rounded,
 									color: kPrimary,
-									onPressed: (_channel != null && !_capturing) ? _start : null,
+									onPressed: (_espConnected && !_capturing) ? _start : null,
 								),
 							],
 						),
@@ -434,7 +439,7 @@ class _HomeScreenState extends State<HomeScreen> {
 							children: [
 								Expanded(
 									child: ElevatedButton.icon(
-										onPressed: _connecting ? null : _connectWs,
+										onPressed: _connecting ? null : _ping,
 										style: ElevatedButton.styleFrom(
 											backgroundColor: kDark,
 											foregroundColor: Colors.white,
@@ -442,7 +447,7 @@ class _HomeScreenState extends State<HomeScreen> {
 											shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
 										),
 										icon: const Icon(Icons.wifi_tethering_rounded),
-										label: const Text('Reconnect'),
+										label: const Text('Ping'),
 									),
 								),
 								const SizedBox(width: 10),

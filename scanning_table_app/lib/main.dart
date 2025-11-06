@@ -5,8 +5,6 @@ import 'pages/pages.dart';
 const kPrimary = Color(0xFF05989E);
 const kDark = Color(0xFF3C444B);
 
-
-
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final cameras = await availableCameras();

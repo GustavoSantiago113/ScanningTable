@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Allow cleartext traffic specifically for local devices -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.168.4.1</domain>
+    </domain-config>
+    <!-- Fallback base-config (still respects usesCleartextTraffic on Application) -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
