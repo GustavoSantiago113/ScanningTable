@@ -42,3 +42,8 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // DocumentFile is provided by the androidx.documentfile artifact
+    implementation("androidx.documentfile:documentfile:1.0.1")
+}

@@ -6,12 +6,15 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:flutter/services.dart';
 import '../components/components.dart';
 
 import '../main.dart' show kPrimary, kDark;
 
 const int kDefaultTurns = 6;
 const String kEspBaseUrl = 'http://192.168.4.1';
+const Duration kCaptureDelay = Duration(milliseconds: 800); // wait after motor stops
 
 class HomeScreen extends StatefulWidget {
 	final List<CameraDescription> cameras;
@@ -34,6 +37,8 @@ class _HomeScreenState extends State<HomeScreen> {
 	bool _cameraReady = false;
 	bool _capturing = false;
 	int _primaryBackIndex = 0;
+	final MethodChannel _safChannel = const MethodChannel('com.gustavo.saf');
+	String? _safTreeUri;
 	Offset? _focusUiPos;
 	Timer? _focusUiTimer;
 	final _stopsCtrl = TextEditingController(text: '12');
@@ -42,7 +47,11 @@ class _HomeScreenState extends State<HomeScreen> {
 	@override
 	void initState() {
 		super.initState();
+		// Keep screen awake while using the app
+		WakelockPlus.enable();
 		_detectBackCameras();
+		// Prepare storage folder early and then init camera & ping
+		_ensurePhotoDir();
 		_initCameraForIndex(_primaryBackIndex).then((_) => _ping());
 	}
 
@@ -51,6 +60,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
 	@override
 	void dispose() {
+		// Allow screen to sleep again when leaving the app
+		WakelockPlus.disable();
 		_pollTimer?.cancel();
 		_camera?.dispose();
 		_stopsCtrl.dispose();
@@ -156,8 +167,52 @@ class _HomeScreenState extends State<HomeScreen> {
 			final savePath = '${dir.path}${Platform.pathSeparator}$name';
 			_addLog('Capturing photo...');
 			final XFile shot = await _camera!.takePicture();
-			await File(shot.path).copy(savePath);
-			_addLog('Saved: $name');
+			final bytes = await File(shot.path).readAsBytes();
+			// If the user picked a SAF folder, try saving via the native SAF bridge
+			if (_safTreeUri != null) {
+				try {
+					final b64 = base64Encode(bytes);
+					final ok = await _safChannel.invokeMethod<bool>('saveFileToDirectory', {
+						'treeUri': _safTreeUri,
+						'filename': name,
+						'base64': b64,
+					});
+					if (ok == true) {
+						_addLog('Saved (SAF): $name');
+						if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+							SnackBar(content: Text('Saved $name'), duration: const Duration(seconds: 2), action: SnackBarAction(label: 'Open', onPressed: _openDownloads)),
+						);
+					} else {
+						// Fallback to local copy
+						await File(shot.path).copy(savePath);
+						_addLog('Saved: $name');
+					}
+				} catch (e) {
+					_addLog('SAF save failed: $e');
+					// Fallback
+					await File(shot.path).copy(savePath);
+					_addLog('Saved: $name');
+				}
+			} else {
+				await File(shot.path).copy(savePath);
+				_addLog('Saved: $name');
+				// Notify the media scanner so the image appears in gallery
+				if (Platform.isAndroid) {
+					try {
+						await Process.run('am', [
+							'broadcast',
+							'-a',
+							'android.intent.action.MEDIA_SCANNER_SCAN_FILE',
+							'-d',
+							'file://$savePath'
+						]);
+					} catch (e) {
+						// Ignore if media scanner notification fails
+					}
+				}
+			}
+			// Give the device a short moment to ensure file IO settles before continuing the motor
+			await Future.delayed(kCaptureDelay);
 			await _httpContinue();
 			_addLog('Sent CONTINUE');
 		} catch (e) {
@@ -168,10 +223,66 @@ class _HomeScreenState extends State<HomeScreen> {
 	}
 
 	Future<Directory> _photosDir() async {
-		final base = await getApplicationDocumentsDirectory();
-		final dir = Directory('${base.path}${Platform.pathSeparator}ScanningTable');
-		if (!await dir.exists()) { await dir.create(recursive: true); }
-		return dir;
+		// Save images to the Android Downloads folder when possible to make them easy to find.
+		try {
+			if (Platform.isAndroid) {
+				// Request storage permission on Android
+				final storagePermission = await Permission.storage.request();
+				if (!storagePermission.isGranted) {
+					_addLog('Storage permission not granted, falling back to app directory');
+					final appDir = await getApplicationDocumentsDirectory();
+					final fallback = Directory('${appDir.path}${Platform.pathSeparator}ScanningTable');
+					if (!await fallback.exists()) await fallback.create(recursive: true);
+					return fallback;
+				}
+				// Common public Downloads path on Android
+				final downloads = Directory('/storage/emulated/0/Download');
+				if (!await downloads.exists()) await downloads.create(recursive: true);
+				return downloads;
+			} else {
+				// Non-Android: use app documents directory
+				final appDir = await getApplicationDocumentsDirectory();
+				final dir = Directory('${appDir.path}${Platform.pathSeparator}ScanningTable');
+				if (!await dir.exists()) await dir.create(recursive: true);
+				return dir;
+			}
+		} catch (e) {
+			_addLog('Error selecting Downloads directory: $e');
+			final appDir = await getApplicationDocumentsDirectory();
+			final fallback = Directory('${appDir.path}${Platform.pathSeparator}ScanningTable');
+			if (!await fallback.exists()) await fallback.create(recursive: true);
+			return fallback;
+		}
+	}
+
+	Future<void> _ensurePhotoDir() async {
+		try {
+			final dir = await _photosDir();
+			_addLog('Photos dir: ${dir.path}');
+		} catch (e) {
+			_addLog('Photo dir error: $e');
+		}
+	}
+
+	Future<void> _pickFolder() async {
+		try {
+			final uri = await _safChannel.invokeMethod<String>('pickDirectory');
+			if (uri != null) {
+				setState(() => _safTreeUri = uri);
+				_addLog('Picked SAF folder: $uri');
+				if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Folder selected')));
+			}
+		} catch (e) {
+			_addLog('Pick folder failed: $e');
+		}
+	}
+
+	Future<void> _openDownloads() async {
+		try {
+			await _safChannel.invokeMethod('openDownloads');
+		} catch (e) {
+			_addLog('Open folder failed: $e');
+		}
 	}
 
 	String _ts(DateTime dt) {
@@ -197,9 +308,11 @@ class _HomeScreenState extends State<HomeScreen> {
 	Uri _uri(String path, [Map<String, String>? q]) => Uri.parse('$kEspBaseUrl$path').replace(queryParameters: q);
 
 	Future<void> _httpStart(int turns, int stops) async {
-		try {
-			setState(() { _sequenceStarted = true; _lastProcessedStop = 0; });
-			final resp = await http.post(_uri('/start', { 'turns': '$turns', 'stops': '$stops' })).timeout(const Duration(seconds: 3));
+			try {
+				setState(() { _sequenceStarted = true; _lastProcessedStop = 0; });
+				final resp = await http
+						.post(_uri('/start', { 'turns': '$turns', 'stops': '$stops' }))
+						.timeout(const Duration(seconds: 5));
 			_addLog('HTTP /start => ${resp.statusCode} ${resp.body}');
 			setState(() { _espConnected = resp.statusCode == 200; _lastSent = 'START $turns $stops'; });
 			_startPolling();
@@ -210,8 +323,8 @@ class _HomeScreenState extends State<HomeScreen> {
 	}
 
 	Future<void> _httpStop() async {
-		try {
-			final resp = await http.post(_uri('/stop')).timeout(const Duration(seconds: 3));
+			try {
+				final resp = await http.post(_uri('/stop')).timeout(const Duration(seconds: 5));
 			_addLog('HTTP /stop => ${resp.statusCode}');
 			setState(() { _sequenceStarted = false; _lastSent = 'STOP'; });
 		} catch (e) {
@@ -220,8 +333,8 @@ class _HomeScreenState extends State<HomeScreen> {
 	}
 
 	Future<void> _httpContinue() async {
-		try {
-			final resp = await http.post(_uri('/continue')).timeout(const Duration(seconds: 3));
+			try {
+				final resp = await http.post(_uri('/continue')).timeout(const Duration(seconds: 5));
 			_addLog('HTTP /continue => ${resp.statusCode}');
 			setState(() { _lastSent = 'CONTINUE'; });
 		} catch (e) {
@@ -232,8 +345,8 @@ class _HomeScreenState extends State<HomeScreen> {
 	Future<void> _ping() async {
 		if (_connecting) return;
 		setState(() { _connecting = true; });
-		try {
-			final resp = await http.get(_uri('/status')).timeout(const Duration(seconds: 2));
+			try {
+				final resp = await http.get(_uri('/status')).timeout(const Duration(seconds: 5));
 			setState(() { _espConnected = resp.statusCode == 200; _lastReceived = resp.body; });
 			_addLog('HTTP /status => ${resp.statusCode}');
 		} catch (e) {
@@ -248,7 +361,7 @@ class _HomeScreenState extends State<HomeScreen> {
 		_pollTimer?.cancel();
 		_pollTimer = Timer.periodic(const Duration(milliseconds: 400), (_) async {
 			try {
-				final resp = await http.get(_uri('/status')).timeout(const Duration(seconds: 2));
+				final resp = await http.get(_uri('/status')).timeout(const Duration(seconds: 5));
 				if (resp.statusCode != 200) return;
 				final data = jsonDecode(resp.body) as Map<String, dynamic>;
 				final running = data['running'] == true;
@@ -430,7 +543,7 @@ class _HomeScreenState extends State<HomeScreen> {
 									label: 'Start',
 									icon: Icons.play_arrow_rounded,
 									color: kPrimary,
-									onPressed: (_espConnected && !_capturing) ? _start : null,
+									onPressed: (_espConnected && !_capturing && !_sequenceStarted) ? _start : null,
 								),
 							],
 						),
@@ -462,6 +575,38 @@ class _HomeScreenState extends State<HomeScreen> {
 										),
 										icon: const Icon(Icons.stop_rounded),
 										label: const Text('Stop'),
+									),
+								),
+							],
+						),
+						const SizedBox(height: 10),
+						Row(
+							children: [
+								Expanded(
+									child: ElevatedButton.icon(
+										onPressed: _pickFolder,
+										style: ElevatedButton.styleFrom(
+											backgroundColor: kPrimary,
+											foregroundColor: Colors.white,
+											padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+											shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+										),
+										icon: const Icon(Icons.folder_open),
+										label: const Text('Pick folder'),
+									),
+								),
+								const SizedBox(width: 10),
+								Expanded(
+									child: ElevatedButton.icon(
+										onPressed: _openDownloads,
+										style: ElevatedButton.styleFrom(
+											backgroundColor: kDark,
+											foregroundColor: Colors.white,
+											padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+											shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+										),
+										icon: const Icon(Icons.open_in_new),
+										label: const Text('Open folder'),
 									),
 								),
 							],
