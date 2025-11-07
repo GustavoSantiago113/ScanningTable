@@ -443,7 +443,7 @@ class _HomeScreenState extends State<HomeScreen> {
 													min: 1.0,
 													max: _maxZoom <= 1.0 ? 4.0 : _maxZoom,
 													divisions: 100,
-													onChanged: (_cameraReady) ? (v) => _applyZoom(v) : null,
+													onChanged: (_cameraReady && _safTreeUri != null) ? (v) => _applyZoom(v) : null,
 													activeColor: kPrimary,
 													inactiveColor: Colors.white24,
 												),
@@ -543,7 +543,7 @@ class _HomeScreenState extends State<HomeScreen> {
 									label: 'Start',
 									icon: Icons.play_arrow_rounded,
 									color: kPrimary,
-									onPressed: (_espConnected && !_capturing && !_sequenceStarted) ? _start : null,
+									onPressed: (_safTreeUri != null && _espConnected && !_capturing && !_sequenceStarted) ? _start : null,
 								),
 							],
 						),
@@ -552,7 +552,7 @@ class _HomeScreenState extends State<HomeScreen> {
 							children: [
 								Expanded(
 									child: ElevatedButton.icon(
-										onPressed: _connecting ? null : _ping,
+										onPressed: (_connecting || _safTreeUri == null) ? null : _ping,
 										style: ElevatedButton.styleFrom(
 											backgroundColor: kDark,
 											foregroundColor: Colors.white,
@@ -566,7 +566,7 @@ class _HomeScreenState extends State<HomeScreen> {
 								const SizedBox(width: 10),
 								Expanded(
 									child: ElevatedButton.icon(
-										onPressed: _stop,
+										onPressed: (_safTreeUri != null && _sequenceStarted) ? _stop : null,
 										style: ElevatedButton.styleFrom(
 											backgroundColor: Colors.redAccent,
 											foregroundColor: Colors.white,
@@ -581,100 +581,88 @@ class _HomeScreenState extends State<HomeScreen> {
 						),
 						const SizedBox(height: 10),
 						Row(
+							mainAxisAlignment: MainAxisAlignment.center,
 							children: [
-								Expanded(
-									child: ElevatedButton.icon(
-										onPressed: _pickFolder,
-										style: ElevatedButton.styleFrom(
-											backgroundColor: kPrimary,
-											foregroundColor: Colors.white,
-											padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-											shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-										),
-										icon: const Icon(Icons.folder_open),
-										label: const Text('Pick folder'),
+								ElevatedButton.icon(
+									onPressed: _pickFolder,
+									style: ElevatedButton.styleFrom(
+										backgroundColor: kPrimary,
+										foregroundColor: Colors.white,
+										padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+										shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
 									),
+									icon: const Icon(Icons.folder_open),
+									label: const Text('Pick folder'),
 								),
-								const SizedBox(width: 10),
-								Expanded(
-									child: ElevatedButton.icon(
-										onPressed: _openDownloads,
-										style: ElevatedButton.styleFrom(
-											backgroundColor: kDark,
-											foregroundColor: Colors.white,
-											padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-											shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-										),
-										icon: const Icon(Icons.open_in_new),
-										label: const Text('Open folder'),
+								const SizedBox(width: 12),
+								if (_safTreeUri == null)
+									Flexible(
+										child: Text('Please select a folder before starting.', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w600)),
 									),
-								),
 							],
 						),
-					],
-				),
-			),
-		);
+          ]
+        ),
+      )
+    );
 	}
 
-	Widget _logsPane() {
-		final connected = _espConnected;
-		final cameraOk = _cameraReady;
-		final busy = _capturing;
-		final sentStart = _sequenceStarted;
-		final saved = _log.any((l) => l.contains('Saved:'));
-		final hasError = _log.any((l) => l.toLowerCase().contains('error'));
-		final focused = _log.any((l) => l.contains('Focus at'));
+		Widget _logsPane() {
+			final connected = _espConnected;
+			final cameraOk = _cameraReady;
+			final busy = _capturing;
+			final sentStart = _sequenceStarted;
+			final saved = _log.any((l) => l.contains('Saved:'));
+			final hasError = _log.any((l) => l.toLowerCase().contains('error'));
+			final focused = _log.any((l) => l.contains('Focus at'));
 
-		Widget statusIconWithText(IconData icon, String label, bool on) {
-			final bg = on ? kDark : Colors.white24;
-			final fg = on ? Colors.white : Colors.white70;
-			return Column(
-				mainAxisSize: MainAxisSize.min,
-				crossAxisAlignment: CrossAxisAlignment.center,
-				children: [
-					Tooltip(
-						message: label,
-						child: Container(
-							width: 28,
-							height: 28,
-							margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
-							child: CircleAvatar(
-								backgroundColor: bg,
-								radius: 12,
-								child: Icon(icon, color: fg, size: 13),
+			Widget statusIconWithText(IconData icon, String label, bool on) {
+				final bg = on ? kDark : Colors.white24;
+				final fg = on ? Colors.white : Colors.white70;
+				return Column(
+					mainAxisSize: MainAxisSize.min,
+					crossAxisAlignment: CrossAxisAlignment.center,
+					children: [
+						Tooltip(
+							message: label,
+							child: Container(
+								width: 28,
+								height: 28,
+								margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
+								child: CircleAvatar(
+									backgroundColor: bg,
+									radius: 12,
+									child: Icon(icon, color: fg, size: 13),
+								),
 							),
 						),
-					),
-					const SizedBox(height: 2),
-					Text(label, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w400)),
-				],
-			);
-		}
+						const SizedBox(height: 2),
+						Text(label, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w400)),
+					],
+				);
+			}
 
-		return Container(
-			decoration: BoxDecoration(
-				color: Colors.transparent,
-				borderRadius: BorderRadius.circular(16),
-			),
-			padding: const EdgeInsets.fromLTRB(8, 10, 8, 10),
-			child: Column(
-				crossAxisAlignment: CrossAxisAlignment.center,
-				children: [
-					statusIconWithText(Icons.wifi, 'Connected to ESP', connected),
-					statusIconWithText(Icons.photo_camera, 'Camera Ready', cameraOk),
-					statusIconWithText(Icons.play_arrow, 'Sequence Started', sentStart),
-					statusIconWithText(Icons.camera_alt, 'Photo Captured', saved),
-					statusIconWithText(Icons.center_focus_strong, 'Focused', focused),
-					statusIconWithText(Icons.hourglass_bottom, 'Capturing', busy),
-					statusIconWithText(Icons.error_outline, 'Error', hasError),
-					const SizedBox(height: 8),
-					if (_lastSent != null)
-						Text('Last sent: ${_lastSent!.length > 40 ? '${_lastSent!.substring(0,40)}...' : _lastSent}', style: const TextStyle(color: Colors.white70, fontSize: 10)),
-					if (_lastReceived != null)
-						Text('Last recv: ${_lastReceived!.length > 40 ? '${_lastReceived!.substring(0,40)}...' : _lastReceived}', style: const TextStyle(color: Colors.white70, fontSize: 10)),
-				],
-			),
-		);
-	}
+					return Container(
+						decoration: BoxDecoration(
+							color: Colors.transparent,
+							borderRadius: BorderRadius.circular(16),
+						),
+						padding: const EdgeInsets.fromLTRB(8, 10, 8, 10),
+						child: Scrollbar(
+							thumbVisibility: true,
+							child: ListView(
+								padding: EdgeInsets.zero,
+								children: [
+									statusIconWithText(Icons.wifi, 'Connected to ESP', connected),
+									statusIconWithText(Icons.photo_camera, 'Camera Ready', cameraOk),
+									statusIconWithText(Icons.play_arrow, 'Sequence Started', sentStart),
+									statusIconWithText(Icons.camera_alt, 'Photo Captured', saved),
+									statusIconWithText(Icons.center_focus_strong, 'Focused', focused),
+									statusIconWithText(Icons.hourglass_bottom, 'Capturing', busy),
+									statusIconWithText(Icons.error_outline, 'Error', hasError),
+								],
+							),
+						),
+					);
+		}
 }

@@ -18,6 +18,7 @@ class ScanningTableApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      debugShowCheckedModeBanner: false,
       title: 'Scanning Table',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: kPrimary),
