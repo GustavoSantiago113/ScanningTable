@@ -31,6 +31,8 @@ The communication between the control app and the turntable is handled via a Wi-
 - **Electronics:** The system is controlled by an ESP8266 microcontroller. A custom PCB design is available in the `PCB/` directory, which simplifies the wiring of the stepper motor driver, the ESP8266, and the power supply.
 - **Stepper Motor and Driver:** 28BYJ-48 DC stepper motor + ULN2003 driver.
 
+![Assembled Scanner](/README_files/Assembled%20Scanner.jpg)
+
 ### Firmware (ESP8266)
 The firmware is written in C++ using the Arduino framework. It is located in `ESP8266/scanningTable/`.
 
@@ -52,6 +54,8 @@ The mobile application, located in `scanning_table_app/`, provides a user-friend
 - **File Management (SAF):** Uses Android's Storage Access Framework (SAF) to allow the user to select a custom folder for saving the captured images, ensuring they are easily accessible.
 - **Real-time Status:** Displays connection status, sequence progress, and a log of events.
 - **Wakelock:** Keeps the phone's screen awake during a scanning session.
+
+![App](./README_files/App.jpg)
 
 ## Setup Instructions
 
