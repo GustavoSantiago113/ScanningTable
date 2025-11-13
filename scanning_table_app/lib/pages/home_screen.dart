@@ -89,7 +89,7 @@ class _HomeScreenState extends State<HomeScreen> {
 			}
 			final controller = CameraController(
 				desc,
-				ResolutionPreset.medium,
+				ResolutionPreset.max, // Use the highest available resolution
 				enableAudio: false,
 				imageFormatGroup: ImageFormatGroup.jpeg,
 			);
@@ -166,6 +166,7 @@ class _HomeScreenState extends State<HomeScreen> {
 			final name = 'stop_${stopIndex.toString().padLeft(2, '0')}_${_ts(ts)}.jpg';
 			final savePath = '${dir.path}${Platform.pathSeparator}$name';
 			_addLog('Capturing photo...');
+			// Take picture with highest quality (if supported)
 			final XFile shot = await _camera!.takePicture();
 			final bytes = await File(shot.path).readAsBytes();
 			// If the user picked a SAF folder, try saving via the native SAF bridge
