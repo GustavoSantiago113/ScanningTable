@@ -27,7 +27,7 @@ The communication between the control app and the turntable is handled via a Wi-
 ## Components
 
 ### Hardware
-- **3D Printed Parts:** All necessary `.stl` files for the table structure are located in the `3D Files/` directory.
+- **3D Printed Parts:** All necessary `.stl` files for the table structure are located in the `3D Files/` directory. **They were retrieved and modified from PCB Community (All credits to the authors)**.
 - **Electronics:** The system is controlled by an ESP8266 microcontroller. A custom PCB design is available in the `PCB/` directory, which simplifies the wiring of the stepper motor driver, the ESP8266, and the power supply.
 - **Stepper Motor and Driver:** 28BYJ-48 DC stepper motor + ULN2003 driver.
 
