@@ -28,8 +28,6 @@ class _HomeScreenState extends State<HomeScreen> {
 	bool _connecting = false;
 	bool _sequenceStarted = false;
 	bool _espConnected = false;
-	bool _cameraPermChecked = false;
-	bool _cameraPermGranted = false;
 	String? _lastSent;
 	String? _lastReceived;
 	double _zoom = 1.0;
@@ -45,20 +43,28 @@ class _HomeScreenState extends State<HomeScreen> {
 	Timer? _focusUiTimer;
 	final _stopsCtrl = TextEditingController(text: '12');
 	final List<String> _log = [];
+	bool _flashOn = false;
+	Future<void> _toggleFlash(bool value) async {
+		if (_camera == null || !_cameraReady) return;
+		try {
+			await _camera!.setFlashMode(value ? FlashMode.torch : FlashMode.off);
+			setState(() {
+				_flashOn = value;
+			});
+		} catch (e) {
+			_addLog('Flash error: $e');
+		}
+	}
 
 	@override
 	void initState() {
 		super.initState();
 		// Keep screen awake while using the app
 		WakelockPlus.enable();
-		_checkAndRequestCameraPermission().then((_) {
-			if (_cameraPermGranted) {
-				_detectBackCameras();
-				// Prepare storage folder early and then init camera & ping
-				_ensurePhotoDir();
-				_initCameraForIndex(_primaryBackIndex).then((_) => _ping());
-			}
-		});
+		_detectBackCameras();
+		// Prepare storage folder early and then init camera & ping
+		_ensurePhotoDir();
+		_initCameraForIndex(_primaryBackIndex).then((_) => _ping());
 	}
 
 	Timer? _pollTimer;
@@ -77,70 +83,43 @@ class _HomeScreenState extends State<HomeScreen> {
 
 	Future<void> _initCameraForIndex(int index) async {
 		try {
-			if (!_cameraPermGranted) {
-				_addLog('Camera permission not granted. Skipping init.');
-				return;
-			}
 			if (widget.cameras.isEmpty) {
 				_addLog('No cameras found.');
 				return;
 			}
-		       if (index < 0 || index >= widget.cameras.length) index = 0;
-		       // Permission already checked before calling this method
+			if (index < 0 || index >= widget.cameras.length) index = 0;
+			final camPerm = await Permission.camera.request();
+			if (!camPerm.isGranted) {
+				_addLog('Camera permission not granted.');
+				return;
+			}
 			final desc = widget.cameras[index];
 			if (_camera != null) {
 				try { await _camera!.dispose(); } catch (_) {}
 				_camera = null;
 				_cameraReady = false;
 			}
-		       final controller = CameraController(
-			       desc,
-			       ResolutionPreset.max, // Use a more compatible resolution
-			       enableAudio: false,
-			       imageFormatGroup: ImageFormatGroup.jpeg,
-		       );
-		       try {
-			       await controller.initialize();
-		       } catch (e) {
-			       _addLog('Camera initialize() failed: $e');
-			       setState(() { _cameraReady = false; });
-			       return;
-		       }
-		       try {
-			       _minZoom = await controller.getMinZoomLevel();
-			       _maxZoom = await controller.getMaxZoomLevel();
-			       final initialZoom = (_minZoom <= 1.0 && 1.0 <= _maxZoom) ? 1.0 : _minZoom;
-			       await controller.setZoomLevel(initialZoom);
-			       setState(() {
-				       _camera = controller;
-				       _cameraReady = true;
-				       final sliderMin = 1.0;
-				       _zoom = initialZoom.clamp(sliderMin, _maxZoom);
-			       });
-			       _addLog('Camera initialized (${desc.name}, ${desc.lensDirection}). min:${_minZoom.toStringAsFixed(2)} max:${_maxZoom.toStringAsFixed(2)}');
-		       } catch (e) {
-			       _addLog('Camera zoom/init error: $e');
-			       setState(() { _cameraReady = false; });
-		       }
+			final controller = CameraController(
+				desc,
+				ResolutionPreset.max, // Use the highest available resolution
+				enableAudio: false,
+				imageFormatGroup: ImageFormatGroup.jpeg,
+			);
+			await controller.initialize();
+			_minZoom = await controller.getMinZoomLevel();
+			_maxZoom = await controller.getMaxZoomLevel();
+			final initialZoom = (_minZoom <= 1.0 && 1.0 <= _maxZoom) ? 1.0 : _minZoom;
+			await controller.setZoomLevel(initialZoom);
+			setState(() {
+				_camera = controller;
+				_cameraReady = true;
+				final sliderMin = 1.0;
+				_zoom = initialZoom.clamp(sliderMin, _maxZoom);
+			});
+			_addLog('Camera initialized (${desc.name}, ${desc.lensDirection}). min:${_minZoom.toStringAsFixed(2)} max:${_maxZoom.toStringAsFixed(2)}');
 		} catch (e) {
 			_addLog('Camera init error: $e');
 			setState(() { _cameraReady = false; });
-		}
-	}
-
-	Future<void> _checkAndRequestCameraPermission() async {
-		final status = await Permission.camera.status;
-		if (status.isGranted) {
-			setState(() { _cameraPermChecked = true; _cameraPermGranted = true; });
-			return;
-		}
-		final result = await Permission.camera.request();
-		setState(() {
-			_cameraPermChecked = true;
-			_cameraPermGranted = result.isGranted;
-		});
-		if (!result.isGranted) {
-			_addLog('User denied camera permission.');
 		}
 	}
 
@@ -447,34 +426,6 @@ class _HomeScreenState extends State<HomeScreen> {
 									const SizedBox(height: 2),
 									Text('ESP8266 + Camera', style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white70), textAlign: TextAlign.center),
 									const SizedBox(height: 8),
-									if (_cameraPermChecked && !_cameraPermGranted)
-										Card(
-											color: Colors.red.shade50,
-											shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-											child: Padding(
-												padding: const EdgeInsets.all(12.0),
-												child: Column(
-													children: [
-														const Text('Camera permission required to start.', style: TextStyle(color: Colors.black87, fontWeight: FontWeight.w600)),
-														const SizedBox(height: 8),
-														ElevatedButton.icon(
-															onPressed: _checkAndRequestCameraPermission,
-															icon: const Icon(Icons.lock_open),
-															label: const Text('Grant Camera Access'),
-															style: ElevatedButton.styleFrom(
-																backgroundColor: kPrimary,
-																foregroundColor: Colors.white,
-																shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-															),
-														),
-														TextButton(
-															onPressed: () => openAppSettings(),
-															child: const Text('Open App Settings'),
-														),
-													],
-												),
-											),
-										),
 									Expanded(
 										flex: 6,
 										child: LayoutBuilder(builder: (context, constraints) {
@@ -657,6 +608,19 @@ class _HomeScreenState extends State<HomeScreen> {
 									label: const Text('Pick folder'),
 								),
 								const SizedBox(width: 12),
+								Row(
+									children: [
+										const Icon(Icons.flash_on, color: kDark),
+										Switch(
+											value: _flashOn,
+											onChanged: (_cameraReady && _camera != null)
+													? (v) => _toggleFlash(v)
+													: null,
+											activeColor: kPrimary,
+										),
+									],
+								),
+								const SizedBox(width: 12),
 								if (_safTreeUri == null)
 									Flexible(
 										child: Text('Please select a folder before starting.', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w600)),
@@ -704,42 +668,27 @@ class _HomeScreenState extends State<HomeScreen> {
 				);
 			}
 
-			       String? lastError;
-			       for (final l in _log) {
-				       if (l.toLowerCase().contains('error') || l.toLowerCase().contains('failed')) {
-					       lastError = l;
-					       break;
-				       }
-			       }
-			       return Container(
-				       decoration: BoxDecoration(
-					       color: Colors.transparent,
-					       borderRadius: BorderRadius.circular(16),
-				       ),
-				       padding: const EdgeInsets.fromLTRB(8, 10, 8, 10),
-				       child: Scrollbar(
-					        thumbVisibility: true,
-                  child: ListView(
-                    padding: EdgeInsets.zero,
-                      children: [
-                        statusIconWithText(Icons.wifi, 'Connected to ESP', connected),
-                        statusIconWithText(Icons.photo_camera, 'Camera Ready', cameraOk),
-                        statusIconWithText(Icons.play_arrow, 'Sequence Started', sentStart),
-                        statusIconWithText(Icons.camera_alt, 'Photo Captured', saved),
-                        statusIconWithText(Icons.center_focus_strong, 'Focused', focused),
-                        statusIconWithText(Icons.hourglass_bottom, 'Capturing', busy),
-                        statusIconWithText(Icons.error_outline, 'Error', hasError),
-                        /* if (lastError != null) ...[
-                          const SizedBox(height: 10),
-                          Text(
-                            lastError,
-                            style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 12),
-                            textAlign: TextAlign.left,
-                          ),
-                        ], */
-                      ],
-                  ),
-				       ),
-			       );
+					return Container(
+						decoration: BoxDecoration(
+							color: Colors.transparent,
+							borderRadius: BorderRadius.circular(16),
+						),
+						padding: const EdgeInsets.fromLTRB(8, 10, 8, 10),
+						child: Scrollbar(
+							thumbVisibility: true,
+							child: ListView(
+								padding: EdgeInsets.zero,
+								children: [
+									statusIconWithText(Icons.wifi, 'Connected to ESP', connected),
+									statusIconWithText(Icons.photo_camera, 'Camera Ready', cameraOk),
+									statusIconWithText(Icons.play_arrow, 'Sequence Started', sentStart),
+									statusIconWithText(Icons.camera_alt, 'Photo Captured', saved),
+									statusIconWithText(Icons.center_focus_strong, 'Focused', focused),
+									statusIconWithText(Icons.hourglass_bottom, 'Capturing', busy),
+									statusIconWithText(Icons.error_outline, 'Error', hasError),
+								],
+							),
+						),
+					);
 		}
 }
