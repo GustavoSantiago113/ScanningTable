@@ -1,0 +1,5 @@
+Wemos D1 Mini ESP8266 Board x 1	
+28BYJ-48 Stepper Motor + ULN2003AN DIP-16 Driver and Wires x 1	
+L7805 1.5A Fixed 5V TO-220 Voltage Regulator x 1
+100uF 16V Aluminum Electrolytic Capacitors x 1	
+100nF Through Hole Ceramic Capacitors x 2
