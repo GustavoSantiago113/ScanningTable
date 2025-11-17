@@ -616,7 +616,7 @@ class _HomeScreenState extends State<HomeScreen> {
 											onChanged: (_cameraReady && _camera != null)
 													? (v) => _toggleFlash(v)
 													: null,
-											activeColor: kPrimary,
+											activeThumbColor: kPrimary,
 										),
 									],
 								),
