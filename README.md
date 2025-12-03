@@ -42,6 +42,7 @@ The firmware is written in C++ using the Arduino framework. It is located in `ES
   - `POST /start`: Starts a new scanning sequence. Requires `turns` and `stops` as query parameters.
   - `POST /continue`: Resumes the sequence after a photo has been taken.
   - `POST /stop`: Immediately stops the current sequence.
+  - `POST /rotate`: Performs a complete rotation without stopping. Requires `turns` as query parameter (defaults to 1). Useful for video recording a full 360° rotation.
 
 ### 📱 Mobile App (Flutter)
 The mobile application, located in `scanning_table_app/`, provides a user-friendly interface to control the scanning process.
@@ -50,7 +51,8 @@ The mobile application, located in `scanning_table_app/`, provides a user-friend
 - **Camera Control:** Live preview from the phone's camera with digital zoom and focus adjustment.
 - **Sequence Automation:** Manages the start/stop/continue commands sent to the ESP8266.
 - **Automatic Photo Capture:** Takes a picture automatically each time the turntable stops.
-- **File Management (SAF):** Uses Android's Storage Access Framework (SAF) to allow the user to select a custom folder for saving the captured images, ensuring they are easily accessible.
+- **Video Recording:** The "Rotate+Record" button initiates a complete rotation while recording video, perfect for creating 360° video captures.
+- **File Management (SAF):** Uses Android's Storage Access Framework (SAF) to allow the user to select a custom folder for saving the captured images and videos, ensuring they are easily accessible.
 - **Real-time Status:** Displays connection status, sequence progress, and a log of events.
 - **Wakelock:** Keeps the phone's screen awake during a scanning session.
 

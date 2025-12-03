@@ -25,6 +25,12 @@ int totalStops = 0;
 int currentStop = 0;
 long stepsPerStop = 0;
 
+// --- Rotation (full turn) state ---
+bool performingRotation = false;
+long rotationStepsRemaining = 0;
+int rotationDir_global = 1;
+int lastDir = 0; // global last direction (1 or -1)
+
 // --- Helpers ---
 void sendJson(const String &json, int code = 200) {
   server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -58,7 +64,6 @@ void moveOneSegment() {
 void performSteps(long nsteps) {
   if (nsteps == 0) return;
 
-  static int lastDir = 0;
   int dir = (nsteps > 0) ? 1 : -1;
   if (dir != lastDir && lastDir != 0) {
     Serial.println("Direction change cooldown");
@@ -71,6 +76,48 @@ void performSteps(long nsteps) {
     stepper.step(dir);    // one micro-step
     delayMicroseconds(1000); // slower = lower current spike
     yield();              // keep Wi-Fi / watchdog alive
+  }
+}
+
+// Called repeatedly from loop() to perform an in-progress full rotation
+void processRotation() {
+  if (!performingRotation || rotationStepsRemaining <= 0) return;
+  // Interrupt rotation if STOP was sent
+  if (!running) {
+    performingRotation = false;
+    waitingForContinue = false;
+    Serial.println("Rotation interrupted by STOP.");
+    return;
+  }
+
+  // If direction changed since last stepping, allow cooldown
+  if (rotationDir_global != lastDir && lastDir != 0) {
+    Serial.println("Direction change cooldown");
+    delay(200);
+  }
+  lastDir = rotationDir_global;
+
+  // Step in small chunks so we don't block the server for too long
+  long chunk = (rotationStepsRemaining < 200) ? rotationStepsRemaining : 200;
+  for (long i = 0; i < chunk; i++) {
+    stepper.step(rotationDir_global);
+    delayMicroseconds(1000);
+    yield();
+    // Check for STOP during chunk
+    if (!running) {
+      performingRotation = false;
+      waitingForContinue = false;
+      Serial.println("Rotation interrupted by STOP.");
+      return;
+    }
+  }
+  rotationStepsRemaining -= chunk;
+
+  if (rotationStepsRemaining <= 0) {
+    performingRotation = false;
+    running = false;
+    waitingForContinue = false;
+    Serial.println("Full rotation complete.");
   }
 }
 
@@ -122,6 +169,30 @@ void handleStop() {
   sendOk("STOPPED");
 }
 
+void handleRotate() {
+  if (running || performingRotation) {
+    server.send(409, "text/plain", "Already running");
+    return;
+  }
+
+  int turns = 1;
+  if (server.hasArg("turns")) turns = server.arg("turns").toInt();
+  if (turns <= 0) {
+    server.send(400, "text/plain", "Invalid turns. Use POST /rotate?turns=<n>");
+    return;
+  }
+
+  long totalSteps = (long)STEPS_PER_REV * (long)turns;
+  rotationDir_global = (totalSteps >= 0) ? 1 : -1;
+  rotationStepsRemaining = abs(totalSteps);
+  performingRotation = true;
+  running = true;
+  waitingForContinue = false;
+
+  Serial.printf("ROTATE %d turns (%ld steps)\n", turns, totalSteps);
+  sendOk("ROTATING");
+}
+
 void setup() {
   Serial.begin(115200);
   stepper.setSpeed(8);
@@ -138,6 +209,7 @@ void setup() {
   // Start HTTP server
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/start", HTTP_POST, handleStart);
+  server.on("/rotate", HTTP_POST, handleRotate);
   server.on("/continue", HTTP_POST, handleContinue);
   server.on("/stop", HTTP_POST, handleStop);
   server.onNotFound([](){ server.send(404, "text/plain", "Not Found"); });
@@ -147,4 +219,5 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  processRotation();
 }

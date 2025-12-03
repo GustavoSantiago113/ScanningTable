@@ -20,10 +20,13 @@
   <input type="number" id="turns" value="6" min="1" style="width:60px;"> turns<br>
   <input type="number" id="stops" value="12" min="1" style="width:60px;"> stops<br><br>
 
+  <input type="number" id="rotateTurns" value="1" min="1" style="width:60px;"> rotate turns<br>
+
   <button onclick="sendStart()">Start</button>
   <button onclick="sendContinue()">Continue</button>
   <button onclick="sendStop()">Stop</button>
   <button onclick="pollStatus()">Poll Status</button>
+  <button onclick="sendRotate()">Rotate</button>
 
   <div id="log"></div>
 
@@ -63,6 +66,14 @@
       fetch(`${baseUrl}/status`)
         .then(r => r.json())
         .then(json => log(`📊 Status: ${JSON.stringify(json)}`))
+        .catch(e => log(`❌ Error: ${e}`));
+    }
+
+    function sendRotate() {
+      const turns = document.getElementById("rotateTurns").value;
+      fetch(`${baseUrl}/rotate?turns=${turns}`, { method: "POST" })
+        .then(r => r.text())
+        .then(txt => log(`➡️ Sent: ROTATE ${turns}<br>Response: ${txt}`))
         .catch(e => log(`❌ Error: ${e}`));
     }
   </script>
