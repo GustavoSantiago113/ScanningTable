@@ -7,6 +7,7 @@
                      android:maxSdkVersion="32"
                      tools:replace="android:maxSdkVersion" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <application
         android:label="Scanning Table"
         android:name="${applicationName}"

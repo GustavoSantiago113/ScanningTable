@@ -28,6 +28,7 @@ class _HomeScreenState extends State<HomeScreen> {
 	bool _connecting = false;
 	bool _sequenceStarted = false;
 	bool _espConnected = false;
+	bool _recording = false;
 	String? _lastSent;
 	String? _lastReceived;
 	double _zoom = 1.0;
@@ -102,7 +103,7 @@ class _HomeScreenState extends State<HomeScreen> {
 			final controller = CameraController(
 				desc,
 				ResolutionPreset.max, // Use the highest available resolution
-				enableAudio: false,
+				enableAudio: false, // Explicitly disable audio to avoid RECORD_AUDIO permission requirement
 				imageFormatGroup: ImageFormatGroup.jpeg,
 			);
 			await controller.initialize();
@@ -313,8 +314,183 @@ class _HomeScreenState extends State<HomeScreen> {
 		_httpStart(kDefaultTurns, stops);
 	}
 
-	void _stop() {
+Future<void> _rotateAndRecord() async {
+  if (_camera == null || !_cameraReady) {
+    debugPrint('[RotateRecord] Camera not ready');
+    return;
+  }
+  if (_recording || _sequenceStarted || _capturing) {
+    debugPrint('[RotateRecord] Busy: recording=$_recording, sequence=$_sequenceStarted, capturing=$_capturing');
+    return;
+  }
+
+  setState(() { _capturing = true; _recording = true; });
+  debugPrint('[RotateRecord] Starting rotate and record');
+
+  try {
+    // Send rotate command first
+    try {
+      debugPrint('[RotateRecord] Sending POST /rotate');
+      final resp = await http
+          .post(_uri('/rotate', { 'turns': '$kDefaultTurns' }))
+          .timeout(const Duration(seconds: 5));
+      debugPrint('[RotateRecord] Rotate response: ${resp.statusCode} ${resp.body}');
+      setState(() { _lastSent = 'ROTATE $kDefaultTurns'; });
+      if (resp.statusCode != 200) {
+        debugPrint('[RotateRecord] Rotate failed with status ${resp.statusCode}');
+        setState(() { _capturing = false; _recording = false; });
+        return;
+      }
+    } catch (e) {
+      debugPrint('[RotateRecord] Rotate request error: $e');
+      setState(() { _capturing = false; _recording = false; });
+      return;
+    }
+
+    // Request microphone permission (required by some Android devices even when audio is disabled)
+    try {
+      final micPerm = await Permission.microphone.request();
+      debugPrint('[RotateRecord] Microphone permission: $micPerm');
+    } catch (e) {
+      debugPrint('[RotateRecord] Microphone permission request failed (non-fatal): $e');
+    }
+
+    // Prepare and start video recording
+    try {
+      debugPrint('[RotateRecord] Preparing video recording');
+      try {
+        await _camera!.prepareForVideoRecording();
+        debugPrint('[RotateRecord] prepareForVideoRecording succeeded');
+      } catch (e) {
+        debugPrint('[RotateRecord] prepareForVideoRecording failed (non-fatal): $e');
+      }
+      debugPrint('[RotateRecord] Starting video recording...');
+      await _camera!.startVideoRecording();
+      debugPrint('[RotateRecord] Video recording started successfully');
+    } catch (e) {
+      debugPrint('[RotateRecord] Failed to start video recording: $e');
+      setState(() { _capturing = false; _recording = false; });
+      return;
+    }
+
+    // Poll until running == false
+    debugPrint('[RotateRecord] Polling status until rotation completes');
+    bool running = true;
+    while (running) {
+      await Future.delayed(const Duration(milliseconds: 400));
+      try {
+        final resp = await http.get(_uri('/status')).timeout(const Duration(seconds: 5));
+        if (resp.statusCode != 200) continue;
+        final data = jsonDecode(resp.body) as Map<String, dynamic>;
+        running = data['running'] == true;
+      } catch (e) {
+        debugPrint('[RotateRecord] Status poll error (retrying): $e');
+      }
+    }
+    debugPrint('[RotateRecord] Rotation complete, stopping recording');
+
+    // Rotation finished; stop recording
+    XFile videoFile;
+    try {
+      videoFile = await _camera!.stopVideoRecording();
+      debugPrint('[RotateRecord] Video recording stopped: ${videoFile.path}');
+      setState(() { _capturing = false; _recording = false; });
+    } catch (e) {
+      debugPrint('[RotateRecord] Failed to stop video recording: $e');
+      setState(() { _capturing = false; _recording = false; });
+      return;
+    }
+
+    // Save video to selected folder or fallback to Downloads
+    final ts = DateTime.now();
+    final name = 'rotate_${_ts(ts)}.mp4';
+    debugPrint('[RotateRecord] Saving video as $name');
+    try {
+      final bytes = await File(videoFile.path).readAsBytes();
+      
+      // Try SAF folder first if user picked one
+      if (_safTreeUri != null) {
+        try {
+          // For video files, we need to save in chunks to avoid OOM
+          // But let's try the existing SAF method first with the file
+          final tempFile = File(videoFile.path);
+          final length = await tempFile.length();
+          debugPrint('[RotateRecord] Video file size: ${(length / 1024 / 1024).toStringAsFixed(2)} MB');
+          
+          // If file is small enough (< 100MB), use base64
+          if (length < 100 * 1024 * 1024) {
+            final b64 = base64Encode(bytes);
+            final ok = await _safChannel.invokeMethod<bool>('saveFileToDirectory', {
+              'treeUri': _safTreeUri,
+              'filename': name,
+              'base64': b64,
+            });
+            if (ok == true) {
+              debugPrint('[RotateRecord] Saved via SAF: $name');
+              _addLog('Video saved (SAF): $name');
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('Video saved: $name'),
+                    duration: const Duration(seconds: 3),
+                    action: SnackBarAction(label: 'Open', onPressed: _openDownloads),
+                  ),
+                );
+              }
+              return;
+            }
+          }
+          debugPrint('[RotateRecord] File too large or SAF failed, using fallback');
+        } catch (e) {
+          debugPrint('[RotateRecord] SAF save error: $e, using fallback');
+        }
+      }
+      
+      // Fallback to Downloads folder
+      final dir = await _photosDir();
+      final dst = '${dir.path}${Platform.pathSeparator}$name';
+      await File(videoFile.path).copy(dst);
+      debugPrint('[RotateRecord] Saved video to Downloads: $dst');
+      _addLog('Video saved: $name');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Video saved: $name'),
+            duration: const Duration(seconds: 3),
+            action: SnackBarAction(label: 'Open', onPressed: _openDownloads),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('[RotateRecord] Save error: $e');
+      _addLog('Video save error: $e');
+    }
+  } catch (e) {
+    debugPrint('[RotateRecord] Unexpected error: $e');
+    try {
+      if (_recording) {
+        await _camera!.stopVideoRecording();
+        debugPrint('[RotateRecord] Stopped recording after error');
+      }
+    } catch (e2) {
+      debugPrint('[RotateRecord] Error stopping recording: $e2');
+    }
+    setState(() { _capturing = false; _recording = false; });
+  }
+}	void _stop() async {
 		_httpStop();
+		// If recording is in progress, stop it
+		if (_recording && _camera != null) {
+			try {
+				debugPrint('[Stop] Stopping video recording');
+				await _camera!.stopVideoRecording();
+				setState(() { _recording = false; _capturing = false; });
+				_addLog('Recording stopped by user');
+			} catch (e) {
+				debugPrint('[Stop] Error stopping video: $e');
+				setState(() { _recording = false; _capturing = false; });
+			}
+		}
 	}
 
 	// ------------------ HTTP layer ------------------
@@ -465,6 +641,30 @@ class _HomeScreenState extends State<HomeScreen> {
 										],
 									),
 									const SizedBox(height: 8),
+									Row(
+										children: [
+											const Icon(Icons.flag_rounded, color: Colors.white),
+											const SizedBox(width: 8),
+											Expanded(
+												child: TextField(
+													controller: _stopsCtrl,
+													keyboardType: TextInputType.number,
+													decoration: InputDecoration(
+														filled: true,
+														fillColor: Colors.white,
+														hintText: 'Number of Stops',
+														border: OutlineInputBorder(
+															borderRadius: BorderRadius.circular(12),
+															borderSide: BorderSide.none,
+														),
+														contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+													),
+													style: const TextStyle(fontSize: 16),
+												),
+											),
+										],
+									),
+									const SizedBox(height: 8),
 									_controlsCard(),
 								],
 							),
@@ -535,29 +735,20 @@ class _HomeScreenState extends State<HomeScreen> {
 						Row(
 							children: [
 								Expanded(
-									child: TextField(
-										controller: _stopsCtrl,
-										keyboardType: TextInputType.number,
-										decoration: InputDecoration(
-											filled: true,
-											fillColor: const Color(0xFFF3F6F8),
-											hintText: 'Number of Stops',
-											border: OutlineInputBorder(
-												borderRadius: BorderRadius.circular(12),
-												borderSide: BorderSide.none,
-											),
-											prefixIcon: const Icon(Icons.flag_rounded, color: kDark),
-										),
-										style: const TextStyle(fontSize: 16),
+									child: PillButton(
+										label: 'Rotate+Record',
+										icon: Icons.videocam_rounded,
+										color: Colors.green,
+										onPressed: (_safTreeUri != null && _espConnected && !_capturing && !_sequenceStarted && !_recording && _cameraReady) ? _rotateAndRecord : null,
 									),
 								),
-								const SizedBox(width: 10),
-								PillButton(
-									label: 'Start',
-									icon: Icons.play_arrow_rounded,
-									color: kPrimary,
-									onPressed: (_safTreeUri != null && _espConnected && !_capturing && !_sequenceStarted) ? _start : null,
-								),
+							const SizedBox(width: 10),
+							PillButton(
+								label: 'Start',
+								icon: Icons.play_arrow_rounded,
+								color: kPrimary,
+								onPressed: (_safTreeUri != null && _espConnected && !_capturing && !_sequenceStarted && !_recording) ? _start : null,
+							),
 							],
 						),
 						const SizedBox(height: 10),
@@ -577,19 +768,19 @@ class _HomeScreenState extends State<HomeScreen> {
 									),
 								),
 								const SizedBox(width: 10),
-								Expanded(
-									child: ElevatedButton.icon(
-										onPressed: (_safTreeUri != null && _sequenceStarted) ? _stop : null,
-										style: ElevatedButton.styleFrom(
-											backgroundColor: Colors.redAccent,
-											foregroundColor: Colors.white,
-											padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-											shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-										),
-										icon: const Icon(Icons.stop_rounded),
-										label: const Text('Stop'),
+							Expanded(
+								child: ElevatedButton.icon(
+									onPressed: (_safTreeUri != null && (_sequenceStarted || _recording)) ? _stop : null,
+									style: ElevatedButton.styleFrom(
+										backgroundColor: Colors.redAccent,
+										foregroundColor: Colors.white,
+										padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+										shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
 									),
+									icon: const Icon(Icons.stop_rounded),
+									label: const Text('Stop'),
 								),
+							),
 							],
 						),
 						const SizedBox(height: 10),
@@ -638,7 +829,6 @@ class _HomeScreenState extends State<HomeScreen> {
 			final cameraOk = _cameraReady;
 			final busy = _capturing;
 			final sentStart = _sequenceStarted;
-			final saved = _log.any((l) => l.contains('Saved:'));
 			final hasError = _log.any((l) => l.toLowerCase().contains('error'));
 			final focused = _log.any((l) => l.contains('Focus at'));
 
@@ -682,7 +872,6 @@ class _HomeScreenState extends State<HomeScreen> {
 									statusIconWithText(Icons.wifi, 'Connected to ESP', connected),
 									statusIconWithText(Icons.photo_camera, 'Camera Ready', cameraOk),
 									statusIconWithText(Icons.play_arrow, 'Sequence Started', sentStart),
-									statusIconWithText(Icons.camera_alt, 'Photo Captured', saved),
 									statusIconWithText(Icons.center_focus_strong, 'Focused', focused),
 									statusIconWithText(Icons.hourglass_bottom, 'Capturing', busy),
 									statusIconWithText(Icons.error_outline, 'Error', hasError),
