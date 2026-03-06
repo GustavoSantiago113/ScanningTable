@@ -12,7 +12,7 @@ import '../components/components.dart';
 
 import '../main.dart' show kPrimary, kDark;
 
-const int kDefaultTurns = 6;
+const int kDefaultTurns = 1;
 const String kEspBaseUrl = 'http://192.168.4.1';
 const Duration kCaptureDelay = Duration(milliseconds: 800); // wait after motor stops
 
