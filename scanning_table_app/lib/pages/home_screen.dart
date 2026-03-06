@@ -14,7 +14,7 @@ import '../main.dart' show kPrimary, kDark;
 
 const int kDefaultTurns = 1;
 const String kEspBaseUrl = 'http://192.168.4.1';
-const Duration kCaptureDelay = Duration(milliseconds: 800); // wait after motor stops
+const Duration kCaptureDelay = Duration(milliseconds: 1000); // wait after motor stops
 
 class HomeScreen extends StatefulWidget {
 	final List<CameraDescription> cameras;
@@ -66,6 +66,11 @@ class _HomeScreenState extends State<HomeScreen> {
 		// Prepare storage folder early and then init camera & ping
 		_ensurePhotoDir();
 		_initCameraForIndex(_primaryBackIndex).then((_) => _ping());
+	}
+
+  void _safeSetState(VoidCallback fn) {
+		if (!mounted) return;
+		setState(fn);
 	}
 
 	Timer? _pollTimer;
@@ -232,7 +237,7 @@ class _HomeScreenState extends State<HomeScreen> {
 		} catch (e) {
 			_addLog('Capture error: $e');
 		} finally {
-			setState(() => _capturing = false);
+			_safeSetState(() => _capturing = false);
 		}
 	}
 
@@ -240,8 +245,17 @@ class _HomeScreenState extends State<HomeScreen> {
 		// Save images to the Android Downloads folder when possible to make them easy to find.
 		try {
 			if (Platform.isAndroid) {
-				// Request storage permission on Android
-				final storagePermission = await Permission.storage.request();
+				// Request appropriate storage permission based on Android version
+				PermissionStatus storagePermission;
+				
+				// Android 13+ (API 33+) uses granular media permissions
+				if (await Permission.photos.isGranted || await Permission.photos.request().isGranted) {
+					storagePermission = PermissionStatus.granted;
+				} else {
+					// Fallback to legacy storage permission for older Android versions
+					storagePermission = await Permission.storage.request();
+				}
+				
 				if (!storagePermission.isGranted) {
 					_addLog('Storage permission not granted, falling back to app directory');
 					final appDir = await getApplicationDocumentsDirectory();
@@ -314,181 +328,193 @@ class _HomeScreenState extends State<HomeScreen> {
 		_httpStart(kDefaultTurns, stops);
 	}
 
-Future<void> _rotateAndRecord() async {
-  if (_camera == null || !_cameraReady) {
-    debugPrint('[RotateRecord] Camera not ready');
-    return;
-  }
-  if (_recording || _sequenceStarted || _capturing) {
-    debugPrint('[RotateRecord] Busy: recording=$_recording, sequence=$_sequenceStarted, capturing=$_capturing');
-    return;
-  }
+  Future<void> _rotateAndRecord() async {
+		if (_camera == null || !_cameraReady) {
+			debugPrint('[RotateRecord] Camera not ready');
+			return;
+		}
+		if (_recording || _sequenceStarted || _capturing) {
+			debugPrint('[RotateRecord] Busy: recording=$_recording, sequence=$_sequenceStarted, capturing=$_capturing');
+			return;
+		}
 
-  setState(() { _capturing = true; _recording = true; });
-  debugPrint('[RotateRecord] Starting rotate and record');
+		_safeSetState(() { _capturing = true; _recording = true; });
+		debugPrint('[RotateRecord] Starting rotate and record');
 
-  try {
-    // Send rotate command first
-    try {
-      debugPrint('[RotateRecord] Sending POST /rotate');
-      final resp = await http
-          .post(_uri('/rotate', { 'turns': '$kDefaultTurns' }))
-          .timeout(const Duration(seconds: 5));
-      debugPrint('[RotateRecord] Rotate response: ${resp.statusCode} ${resp.body}');
-      setState(() { _lastSent = 'ROTATE $kDefaultTurns'; });
-      if (resp.statusCode != 200) {
-        debugPrint('[RotateRecord] Rotate failed with status ${resp.statusCode}');
-        setState(() { _capturing = false; _recording = false; });
-        return;
-      }
-    } catch (e) {
-      debugPrint('[RotateRecord] Rotate request error: $e');
-      setState(() { _capturing = false; _recording = false; });
-      return;
-    }
+		try {
+			// Request microphone permission (some Android devices require it for video)
+			try {
+				final micPerm = await Permission.microphone.request();
+				debugPrint('[RotateRecord] Microphone permission: $micPerm');
+			} catch (e) {
+				debugPrint('[RotateRecord] Microphone permission request failed (non-fatal): $e');
+			}
 
-    // Request microphone permission (required by some Android devices even when audio is disabled)
-    try {
-      final micPerm = await Permission.microphone.request();
-      debugPrint('[RotateRecord] Microphone permission: $micPerm');
-    } catch (e) {
-      debugPrint('[RotateRecord] Microphone permission request failed (non-fatal): $e');
-    }
+			// Prepare and start video recording FIRST
+			try {
+				debugPrint('[RotateRecord] Preparing video recording');
+				try {
+					await _camera!.prepareForVideoRecording();
+					debugPrint('[RotateRecord] prepareForVideoRecording succeeded');
+				} catch (e) {
+					debugPrint('[RotateRecord] prepareForVideoRecording failed (non-fatal): $e');
+				}
+				debugPrint('[RotateRecord] Starting video recording...');
+				await _camera!.startVideoRecording();
+				debugPrint('[RotateRecord] Video recording started successfully');
+			} catch (e) {
+				debugPrint('[RotateRecord] Failed to start video recording: $e');
+				_safeSetState(() { _capturing = false; _recording = false; });
+				return;
+			}
 
-    // Prepare and start video recording
-    try {
-      debugPrint('[RotateRecord] Preparing video recording');
-      try {
-        await _camera!.prepareForVideoRecording();
-        debugPrint('[RotateRecord] prepareForVideoRecording succeeded');
-      } catch (e) {
-        debugPrint('[RotateRecord] prepareForVideoRecording failed (non-fatal): $e');
-      }
-      debugPrint('[RotateRecord] Starting video recording...');
-      await _camera!.startVideoRecording();
-      debugPrint('[RotateRecord] Video recording started successfully');
-    } catch (e) {
-      debugPrint('[RotateRecord] Failed to start video recording: $e');
-      setState(() { _capturing = false; _recording = false; });
-      return;
-    }
+			// Now that recording is running, send rotate command
+			try {
+				debugPrint('[RotateRecord] Sending POST /rotate');
+				final resp = await http
+						.post(_uri('/rotate', { 'turns': '$kDefaultTurns' }))
+						.timeout(const Duration(seconds: 5));
+				debugPrint('[RotateRecord] Rotate response: ${resp.statusCode} ${resp.body}');
+				_safeSetState(() { _lastSent = 'ROTATE $kDefaultTurns'; });
+				if (resp.statusCode != 200) {
+					debugPrint('[RotateRecord] Rotate failed with status ${resp.statusCode}, stopping recording');
+					try {
+						final aborted = await _camera!.stopVideoRecording();
+						debugPrint('[RotateRecord] Recording stopped after rotate failure: ${aborted.path}');
+					} catch (e2) {
+						debugPrint('[RotateRecord] Error stopping video after rotate failure: $e2');
+					}
+					_safeSetState(() { _capturing = false; _recording = false; });
+					return;
+				}
+			} catch (e) {
+				debugPrint('[RotateRecord] Rotate request error: $e, stopping recording');
+				try {
+					final aborted = await _camera!.stopVideoRecording();
+					debugPrint('[RotateRecord] Recording stopped after rotate error: ${aborted.path}');
+				} catch (e2) {
+					debugPrint('[RotateRecord] Error stopping video after rotate request error: $e2');
+				}
+				_safeSetState(() { _capturing = false; _recording = false; });
+				return;
+			}
 
-    // Poll until running == false
-    debugPrint('[RotateRecord] Polling status until rotation completes');
-    bool running = true;
-    while (running) {
-      await Future.delayed(const Duration(milliseconds: 400));
-      try {
-        final resp = await http.get(_uri('/status')).timeout(const Duration(seconds: 5));
-        if (resp.statusCode != 200) continue;
-        final data = jsonDecode(resp.body) as Map<String, dynamic>;
-        running = data['running'] == true;
-      } catch (e) {
-        debugPrint('[RotateRecord] Status poll error (retrying): $e');
-      }
-    }
-    debugPrint('[RotateRecord] Rotation complete, stopping recording');
+			// Poll until running == false
+			debugPrint('[RotateRecord] Polling status until rotation completes');
+			bool running = true;
+			while (running) {
+				await Future.delayed(const Duration(milliseconds: 400));
+				try {
+					final resp = await http.get(_uri('/status')).timeout(const Duration(seconds: 5));
+					if (resp.statusCode != 200) continue;
+					final data = jsonDecode(resp.body) as Map<String, dynamic>;
+					running = data['running'] == true;
+				} catch (e) {
+					debugPrint('[RotateRecord] Status poll error (retrying): $e');
+				}
+			}
+			debugPrint('[RotateRecord] Rotation complete, stopping recording');
 
-    // Rotation finished; stop recording
-    XFile videoFile;
-    try {
-      videoFile = await _camera!.stopVideoRecording();
-      debugPrint('[RotateRecord] Video recording stopped: ${videoFile.path}');
-      setState(() { _capturing = false; _recording = false; });
-    } catch (e) {
-      debugPrint('[RotateRecord] Failed to stop video recording: $e');
-      setState(() { _capturing = false; _recording = false; });
-      return;
-    }
+			// Rotation finished; stop recording
+			XFile videoFile;
+			try {
+				videoFile = await _camera!.stopVideoRecording();
+				debugPrint('[RotateRecord] Video recording stopped: ${videoFile.path}');
+				_safeSetState(() { _capturing = false; _recording = false; });
+			} catch (e) {
+				debugPrint('[RotateRecord] Failed to stop video recording: $e');
+				_safeSetState(() { _capturing = false; _recording = false; });
+				return;
+			}
 
-    // Save video to selected folder or fallback to Downloads
-    final ts = DateTime.now();
-    final name = 'rotate_${_ts(ts)}.mp4';
-    debugPrint('[RotateRecord] Saving video as $name');
-    try {
-      final bytes = await File(videoFile.path).readAsBytes();
-      
-      // Try SAF folder first if user picked one
-      if (_safTreeUri != null) {
-        try {
-          // For video files, we need to save in chunks to avoid OOM
-          // But let's try the existing SAF method first with the file
-          final tempFile = File(videoFile.path);
-          final length = await tempFile.length();
-          debugPrint('[RotateRecord] Video file size: ${(length / 1024 / 1024).toStringAsFixed(2)} MB');
-          
-          // If file is small enough (< 100MB), use base64
-          if (length < 100 * 1024 * 1024) {
-            final b64 = base64Encode(bytes);
-            final ok = await _safChannel.invokeMethod<bool>('saveFileToDirectory', {
-              'treeUri': _safTreeUri,
-              'filename': name,
-              'base64': b64,
-            });
-            if (ok == true) {
-              debugPrint('[RotateRecord] Saved via SAF: $name');
-              _addLog('Video saved (SAF): $name');
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('Video saved: $name'),
-                    duration: const Duration(seconds: 3),
-                    action: SnackBarAction(label: 'Open', onPressed: _openDownloads),
-                  ),
-                );
-              }
-              return;
-            }
-          }
-          debugPrint('[RotateRecord] File too large or SAF failed, using fallback');
-        } catch (e) {
-          debugPrint('[RotateRecord] SAF save error: $e, using fallback');
-        }
-      }
-      
-      // Fallback to Downloads folder
-      final dir = await _photosDir();
-      final dst = '${dir.path}${Platform.pathSeparator}$name';
-      await File(videoFile.path).copy(dst);
-      debugPrint('[RotateRecord] Saved video to Downloads: $dst');
-      _addLog('Video saved: $name');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Video saved: $name'),
-            duration: const Duration(seconds: 3),
-            action: SnackBarAction(label: 'Open', onPressed: _openDownloads),
-          ),
-        );
-      }
-    } catch (e) {
-      debugPrint('[RotateRecord] Save error: $e');
-      _addLog('Video save error: $e');
-    }
-  } catch (e) {
-    debugPrint('[RotateRecord] Unexpected error: $e');
-    try {
-      if (_recording) {
-        await _camera!.stopVideoRecording();
-        debugPrint('[RotateRecord] Stopped recording after error');
-      }
-    } catch (e2) {
-      debugPrint('[RotateRecord] Error stopping recording: $e2');
-    }
-    setState(() { _capturing = false; _recording = false; });
-  }
-}	void _stop() async {
+			// Save video to selected folder or fallback to Downloads (as .mp4)
+			final ts = DateTime.now();
+			final name = 'rotate_${_ts(ts)}.mp4';
+			debugPrint('[RotateRecord] Saving video as $name');
+			try {
+				final bytes = await File(videoFile.path).readAsBytes();
+
+				// Try SAF folder first if user picked one
+				if (_safTreeUri != null) {
+					try {
+						final tempFile = File(videoFile.path);
+						final length = await tempFile.length();
+						debugPrint('[RotateRecord] Video file size: ${(length / 1024 / 1024).toStringAsFixed(2)} MB');
+
+						// If file is small enough (< 100MB), use base64
+						if (length < 100 * 1024 * 1024) {
+							final b64 = base64Encode(bytes);
+							final ok = await _safChannel.invokeMethod<bool>('saveFileToDirectory', {
+								'treeUri': _safTreeUri,
+								'filename': name,
+								'base64': b64,
+							});
+							if (ok == true) {
+								debugPrint('[RotateRecord] Saved via SAF: $name');
+								_addLog('Video saved (SAF): $name');
+								if (mounted) {
+									ScaffoldMessenger.of(context).showSnackBar(
+										SnackBar(
+											content: Text('Video saved (SAF): $name'),
+											duration: const Duration(seconds: 3),
+											action: SnackBarAction(label: 'Open', onPressed: _openDownloads),
+										),
+									);
+								}
+								return;
+							}
+						}
+						debugPrint('[RotateRecord] File too large or SAF failed, using fallback');
+					} catch (e) {
+						debugPrint('[RotateRecord] SAF save error: $e, using fallback');
+					}
+				}
+
+				// Fallback to Downloads folder
+				final dir = await _photosDir();
+				final dst = '${dir.path}${Platform.pathSeparator}$name';
+				await File(videoFile.path).copy(dst);
+				debugPrint('[RotateRecord] Saved video to Downloads: $dst');
+				_addLog('Video saved: $name');
+				if (mounted) {
+					ScaffoldMessenger.of(context).showSnackBar(
+						SnackBar(
+							content: Text('Video saved: $name'),
+							duration: const Duration(seconds: 3),
+							action: SnackBarAction(label: 'Open', onPressed: _openDownloads),
+						),
+					);
+				}
+			} catch (e) {
+				debugPrint('[RotateRecord] Save error: $e');
+				_addLog('Video save error: $e');
+			}
+		} catch (e) {
+			debugPrint('[RotateRecord] Unexpected error: $e');
+			try {
+				if (_recording) {
+					final aborted = await _camera!.stopVideoRecording();
+					debugPrint('[RotateRecord] Stopped recording after error: ${aborted.path}');
+				}
+			} catch (e2) {
+				debugPrint('[RotateRecord] Error stopping recording: $e2');
+			}
+			_safeSetState(() { _capturing = false; _recording = false; });
+		}
+	}
+
+	void _stop() {
 		_httpStop();
 		// If recording is in progress, stop it
 		if (_recording && _camera != null) {
 			try {
 				debugPrint('[Stop] Stopping video recording');
-				await _camera!.stopVideoRecording();
-				setState(() { _recording = false; _capturing = false; });
+				_camera!.stopVideoRecording();
+				_safeSetState(() { _recording = false; _capturing = false; });
 				_addLog('Recording stopped by user');
 			} catch (e) {
 				debugPrint('[Stop] Error stopping video: $e');
-				setState(() { _recording = false; _capturing = false; });
+				_safeSetState(() { _recording = false; _capturing = false; });
 			}
 		}
 	}
@@ -576,103 +602,72 @@ Future<void> _rotateAndRecord() async {
 			}
 		});
 	}
-
-	@override
+  @override
 	Widget build(BuildContext context) {
-		return Stack(
-			children: [
-				Container(
-					decoration: const BoxDecoration(
-						gradient: LinearGradient(
-							colors: [kPrimary, kDark],
-							begin: Alignment.topLeft,
-							end: Alignment.bottomRight,
-						),
-					),
-				),
-				Scaffold(
-					backgroundColor: Colors.transparent,
-					body: SafeArea(
-						child: Padding(
-							padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-							child: Column(
-								crossAxisAlignment: CrossAxisAlignment.stretch,
-								children: [
-									Text('Scanning Table', style: Theme.of(context).textTheme.headlineLarge, textAlign: TextAlign.center),
-									const SizedBox(height: 2),
-									Text('ESP8266 + Camera', style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white70), textAlign: TextAlign.center),
-									const SizedBox(height: 8),
-									Expanded(
-										flex: 6,
-										child: LayoutBuilder(builder: (context, constraints) {
-											final logsWidth = constraints.maxWidth * 0.30;
-											final previewWidth = constraints.maxWidth - logsWidth - 12;
-											return Row(
-												children: [
-													SizedBox(
-														width: previewWidth,
-														child: _previewPane(),
-													),
-													const SizedBox(width: 12),
-													SizedBox(
-														width: logsWidth,
-														child: _logsPane(),
-													),
-												],
-											);
-										}),
-									),
-									const SizedBox(height: 8),
-									Row(
-										children: [
-											const Icon(Icons.zoom_out, color: Colors.white),
-											Expanded(
-												child: Slider(
-													value: _zoom,
-													min: 1.0,
-													max: _maxZoom <= 1.0 ? 4.0 : _maxZoom,
-													divisions: 100,
-													onChanged: (_cameraReady && _safTreeUri != null) ? (v) => _applyZoom(v) : null,
-													activeColor: kPrimary,
-													inactiveColor: Colors.white24,
-												),
-											),
-											const Icon(Icons.zoom_in, color: Colors.white),
-										],
-									),
-									const SizedBox(height: 8),
-									Row(
-										children: [
-											const Icon(Icons.flag_rounded, color: Colors.white),
-											const SizedBox(width: 8),
-											Expanded(
-												child: TextField(
-													controller: _stopsCtrl,
-													keyboardType: TextInputType.number,
-													decoration: InputDecoration(
-														filled: true,
-														fillColor: Colors.white,
-														hintText: 'Number of Stops',
-														border: OutlineInputBorder(
-															borderRadius: BorderRadius.circular(12),
-															borderSide: BorderSide.none,
-														),
-														contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-													),
-													style: const TextStyle(fontSize: 16),
-												),
-											),
-										],
-									),
-									const SizedBox(height: 8),
-									_controlsCard(),
-								],
-							),
-						),
-					),
-				),
-			],
-		);
+		return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+        title: Text('Scanning Table'),
+        backgroundColor: kPrimary,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        centerTitle: true,
+      ),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                flex: 6,
+                child: LayoutBuilder(builder: (context, constraints) {
+                  final logsWidth = constraints.maxWidth * 0.30;
+                  final previewWidth = constraints.maxWidth - logsWidth - 12;
+                  return Row(
+                    children: [
+                      SizedBox(
+                        width: previewWidth,
+                        child: _previewPane(),
+                      ),
+                      const SizedBox(width: 12),
+                      SizedBox(
+                        width: logsWidth,
+                        child: _logsPane(),
+                      ),
+                    ],
+                  );
+                }),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  const Icon(Icons.zoom_out, color: kDark),
+                  Expanded(
+                    child: Slider(
+                      value: _zoom,
+                      min: 1.0,
+                      max: _maxZoom <= 1.0 ? 4.0 : _maxZoom,
+                      divisions: 100,
+                      onChanged: (_cameraReady && _safTreeUri != null) ? (v) => _applyZoom(v) : null,
+                      activeColor: kPrimary,
+                      inactiveColor: Colors.white24,
+                    ),
+                  ),
+                  const Icon(Icons.zoom_in, color: kDark),
+                ],
+              ),
+              const SizedBox(height: 8),
+              _controlsCard(),
+            ],
+          ),
+        ),
+      ),
+    );
 	}
 
 	Widget _previewPane() {
@@ -724,9 +719,9 @@ Future<void> _rotateAndRecord() async {
 
 	Widget _controlsCard() {
 		return Card(
-			color: Colors.white,
+			color: kDark.withOpacity(0.08),
 			elevation: 6,
-			shadowColor: kDark.withOpacity(0.35),
+			shadowColor: kDark.withOpacity(0.08),
 			shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
 			child: Padding(
 				padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 10.0),
@@ -735,20 +730,29 @@ Future<void> _rotateAndRecord() async {
 						Row(
 							children: [
 								Expanded(
-									child: PillButton(
-										label: 'Rotate+Record',
-										icon: Icons.videocam_rounded,
-										color: Colors.green,
-										onPressed: (_safTreeUri != null && _espConnected && !_capturing && !_sequenceStarted && !_recording && _cameraReady) ? _rotateAndRecord : null,
+									child: TextField(
+										controller: _stopsCtrl,
+										keyboardType: TextInputType.number,
+										decoration: InputDecoration(
+											filled: true,
+											fillColor: const Color(0xFFF3F6F8),
+											hintText: 'Number of Stops',
+											border: OutlineInputBorder(
+												borderRadius: BorderRadius.circular(12),
+												borderSide: BorderSide.none,
+											),
+											prefixIcon: const Icon(Icons.flag_rounded, color: kDark),
+										),
+										style: const TextStyle(fontSize: 16),
 									),
 								),
-							const SizedBox(width: 10),
-							PillButton(
-								label: 'Start',
-								icon: Icons.play_arrow_rounded,
-								color: kPrimary,
-								onPressed: (_safTreeUri != null && _espConnected && !_capturing && !_sequenceStarted && !_recording) ? _start : null,
-							),
+								const SizedBox(width: 10),
+								PillButton(
+									label: 'Start',
+									icon: Icons.play_arrow_rounded,
+									color: kPrimary,
+									onPressed: (_safTreeUri != null && _espConnected && !_capturing && !_sequenceStarted && !_recording) ? _start : null,
+								),
 							],
 						),
 						const SizedBox(height: 10),
@@ -768,19 +772,33 @@ Future<void> _rotateAndRecord() async {
 									),
 								),
 								const SizedBox(width: 10),
-							Expanded(
-								child: ElevatedButton.icon(
-									onPressed: (_safTreeUri != null && (_sequenceStarted || _recording)) ? _stop : null,
-									style: ElevatedButton.styleFrom(
-										backgroundColor: Colors.redAccent,
-										foregroundColor: Colors.white,
-										padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-										shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+								Expanded(
+									child: ElevatedButton.icon(
+										onPressed: (_safTreeUri != null && _espConnected && !_capturing && !_sequenceStarted && !_recording && _cameraReady) ? _rotateAndRecord : null,
+										style: ElevatedButton.styleFrom(
+											backgroundColor: kPrimary,
+											foregroundColor: Colors.white,
+											padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+											shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+										),
+										icon: const Icon(Icons.videocam_rounded),
+										label: const Text('Record'),
 									),
-									icon: const Icon(Icons.stop_rounded),
-									label: const Text('Stop'),
 								),
-							),
+								const SizedBox(width: 10),
+								Expanded(
+									child: ElevatedButton.icon(
+										onPressed: (_safTreeUri != null && (_sequenceStarted || _recording)) ? _stop : null,
+										style: ElevatedButton.styleFrom(
+											backgroundColor: Colors.redAccent,
+											foregroundColor: Colors.white,
+											padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+											shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+										),
+										icon: const Icon(Icons.stop_rounded),
+										label: const Text('Stop'),
+									),
+								),
 							],
 						),
 						const SizedBox(height: 10),
@@ -833,7 +851,7 @@ Future<void> _rotateAndRecord() async {
 			final focused = _log.any((l) => l.contains('Focus at'));
 
 			Widget statusIconWithText(IconData icon, String label, bool on) {
-				final bg = on ? kDark : Colors.white24;
+				final bg = on ? kDark : kPrimary.withOpacity(0.3);
 				final fg = on ? Colors.white : Colors.white70;
 				return Column(
 					mainAxisSize: MainAxisSize.min,
@@ -853,14 +871,14 @@ Future<void> _rotateAndRecord() async {
 							),
 						),
 						const SizedBox(height: 2),
-						Text(label, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w400)),
+						Text(label, style: const TextStyle(color: kDark, fontSize: 10, fontWeight: FontWeight.w400)),
 					],
 				);
 			}
 
 					return Container(
 						decoration: BoxDecoration(
-							color: Colors.transparent,
+							color: kDark.withOpacity(0.08),
 							borderRadius: BorderRadius.circular(16),
 						),
 						padding: const EdgeInsets.fromLTRB(8, 10, 8, 10),
