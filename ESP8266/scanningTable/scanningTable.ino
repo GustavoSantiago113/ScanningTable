@@ -15,6 +15,10 @@ const char* password = "12345678";
 #define STEPS_PER_REV 2048
 Stepper stepper(STEPS_PER_REV, IN1, IN3, IN2, IN4);
 
+// --- Motion tuning ---
+// Microsecond delay between individual micro-steps (increase to slow down)
+const unsigned int STEP_DELAY_US = 2000; // was 1000
+
 // --- HTTP Server ---
 ESP8266WebServer server(80);
 
@@ -74,7 +78,7 @@ void performSteps(long nsteps) {
   long todo = abs(nsteps);
   for (long i = 0; i < todo; i++) {
     stepper.step(dir);    // one micro-step
-    delayMicroseconds(1000); // slower = lower current spike
+    delayMicroseconds(STEP_DELAY_US); // tuned delay between micro-steps
     yield();              // keep Wi-Fi / watchdog alive
   }
 }
@@ -101,7 +105,7 @@ void processRotation() {
   long chunk = (rotationStepsRemaining < 200) ? rotationStepsRemaining : 200;
   for (long i = 0; i < chunk; i++) {
     stepper.step(rotationDir_global);
-    delayMicroseconds(1000);
+    delayMicroseconds(STEP_DELAY_US);
     yield();
     // Check for STOP during chunk
     if (!running) {
@@ -195,7 +199,8 @@ void handleRotate() {
 
 void setup() {
   Serial.begin(115200);
-  stepper.setSpeed(8);
+  // Lower speed for gentler, slower rotation
+  stepper.setSpeed(4);
 
   // Start Wi-Fi Access Point
   WiFi.mode(WIFI_AP);
