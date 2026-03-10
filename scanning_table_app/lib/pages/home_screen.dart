@@ -45,6 +45,7 @@ class _HomeScreenState extends State<HomeScreen> {
 	final _stopsCtrl = TextEditingController(text: '12');
 	final List<String> _log = [];
 	bool _flashOn = false;
+	bool _focusLocked = false;
 	Future<void> _toggleFlash(bool value) async {
 		if (_camera == null || !_cameraReady) return;
 		try {
@@ -154,6 +155,10 @@ class _HomeScreenState extends State<HomeScreen> {
 	}
 
 	Future<void> _focusAt(Offset localPos, Size previewSize) async {
+		if (_focusLocked) {
+			_addLog('Tap focus ignored: focus is locked');
+			return;
+		}
 		if (_camera == null || !_cameraReady) return;
 		final nx = (localPos.dx / previewSize.width).clamp(0.0, 1.0);
 		final ny = (localPos.dy / previewSize.height).clamp(0.0, 1.0);
@@ -302,6 +307,23 @@ class _HomeScreenState extends State<HomeScreen> {
 			}
 		} catch (e) {
 			_addLog('Pick folder failed: $e');
+		}
+	}
+
+	Future<void> _toggleFocusLock(bool lock) async {
+		if (_camera == null || !_cameraReady) {
+			_addLog('Cannot change focus lock: camera not ready');
+			return;
+		}
+		try {
+			// Try to set the camera focus mode to locked/auto if the plugin supports it
+			await _camera!.setFocusMode(lock ? FocusMode.locked : FocusMode.auto);
+			_safeSetState(() => _focusLocked = lock);
+			_addLog('Focus ${lock ? 'locked' : 'unlocked'}');
+		} catch (e) {
+			// If the plugin doesn't support setFocusMode, keep logical lock to prevent taps
+			_safeSetState(() => _focusLocked = lock);
+			_addLog('Focus lock change (logical) set: $lock — error: $e');
 		}
 	}
 
@@ -827,15 +849,28 @@ class _HomeScreenState extends State<HomeScreen> {
 													: null,
 											activeThumbColor: kPrimary,
 										),
+										const SizedBox(width: 12),
+										const Icon(Icons.lock, color: kDark),
+										Switch(
+											value: _focusLocked,
+											onChanged: (_cameraReady && _camera != null)
+												? (v) => _toggleFocusLock(v)
+												: null,
+											activeThumbColor: kPrimary,
+										),
 									],
 								),
+							],
+						),
+						Row(
+							children: [
 								const SizedBox(width: 12),
 								if (_safTreeUri == null)
 									Flexible(
 										child: Text('Please select a folder before starting.', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w600)),
 									),
 							],
-						),
+						)
           ]
         ),
       )

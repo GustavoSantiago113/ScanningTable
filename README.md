@@ -1,10 +1,14 @@
-# 📲 3D Scanning Table
+<div align="center">
 
-This project contains all the necessary files and code to build a 3D scanning table. The system is composed of three main parts: the physical hardware (3D printed parts and electronics), the ESP8266 firmware to control the hardware, and a Flutter mobile application to automate the scanning process.
+# 3D Scanning Table
+
+**This project contains all the necessary files and code to build a 3D scanning table. The system is composed of three main parts: the physical hardware (3D printed parts and electronics), the ESP8266 firmware to control the hardware, and a Flutter mobile application to automate the scanning process.**
+
+</div>
 
 ## 📜 Table of Contents
 
-- [📲 3D Scanning Table](#-3d-scanning-table)
+- [3D Scanning Table](#3d-scanning-table)
   - [📜 Table of Contents](#-table-of-contents)
   - [👁️ Project Overview](#️-project-overview)
   - [🧩 Components](#-components)
