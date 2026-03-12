@@ -6,6 +6,8 @@
 
 </div>
 
+---
+
 ## 📜 Table of Contents
 
 - [3D Scanning Table](#3d-scanning-table)
