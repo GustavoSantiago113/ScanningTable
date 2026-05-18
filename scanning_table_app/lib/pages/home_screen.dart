@@ -610,7 +610,8 @@ class _HomeScreenState extends State<HomeScreen> {
 					_sequenceStarted = running;
 					_lastReceived = resp.body;
 				});
-				if (waiting && current > _lastProcessedStop) {
+				// Process any new stop index (including the final stop which may not set "waiting")
+				if (current > _lastProcessedStop) {
 					_lastProcessedStop = current;
 					await _handleStopEvent(current);
 				}

@@ -1,4 +1,4 @@
-package com.example.gnsolutions_app
+package com.example.scanning_table_app
 
 import android.app.Activity
 import android.content.Intent
