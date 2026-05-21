@@ -9,7 +9,7 @@
 ---
 
 - [3D Reconstruction of Small Objects](#3d-reconstruction-of-small-objects)
-- [Step 1 - Image Acquisiton System](#step-1---image-acquisiton-system)
+- [Step 1 - Image Acquisiton hardware](#step-1---image-acquisiton-hardware)
 - [Step 2 - Acquisition Software](#step-2---acquisition-software)
 - [Step 3 - Taking Images](#step-3---taking-images)
 - [Step 4 - Camera Geometry Estimation](#step-4---camera-geometry-estimation)
@@ -23,7 +23,21 @@
 
 ---
 
-# Step 1 - Image Acquisiton System
+# Step 1 - Image Acquisiton hardware
+
+For the table, I 3D modeled and printed a structure for it. It has a base and a top plate. You can find the models in the folder [3DFiles](3DFiles/). You can print it in the way you prefer, but I recommend using PLA, 3 layers of wall width, 20% fill, and 0.2mm layer height. To aid in the table movement, I added **3 2809 bearings.** To fix the motor in place, I used 2 3mm bolts.
+
+The pseudo-random calibration pattern was made using a code in Python, available at the file [generate_pattern.py](utils/generate_pattern.py). It generates the pattern of a 130x130 mm square with 52 squares at each side, and saves as an image.
+
+For the hardware, I used a 28BYJ-48 Stepper Motor with a ULN2003AN DIP-16 Driver. To connect with the phone and control the motor, I am using a Wemos D1 Mini ESP8266 Board. To power it, I am using a 9V power supply and a L7805 voltage regulator, with some capacitors. To connect everything, I made a custom PCB. The bill of materials, schematics and gerber files are in the folder [PCB](PCB/).
+
+<img src="media/IMG_20260521_174254.jpg" width="300" height="300">
+
+
+For the lights, I followed the same method as described by the paper, with a desk lamp at 20 cm perpendicullarly appart from the rotating plate.
+
+<img src="media/IMG_20260521_174245.jpg" width="300" height="300">
+
 
 # Step 2 - Acquisition Software
 
