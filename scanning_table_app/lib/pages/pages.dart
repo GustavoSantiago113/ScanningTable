@@ -1,1 +1,2 @@
-export 'home_screen.dart';
+export 'initial_page.dart';
+export 'scanning_page.dart';

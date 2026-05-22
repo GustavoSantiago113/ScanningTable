@@ -46,4 +46,10 @@ flutter {
 dependencies {
     // DocumentFile is provided by the androidx.documentfile artifact
     implementation("androidx.documentfile:documentfile:1.0.1")
+    // CameraX Camera2 interop — manual shutter speed (1/4 s) and ISO (200) control
+    implementation("androidx.camera:camera-camera2:1.4.1")
+    implementation("androidx.camera:camera-lifecycle:1.4.1")
+    // camera-lifecycle uses `implementation` for Guava, so ListenableFuture is not
+    // exported to our compile classpath — add it explicitly.
+    implementation("com.google.guava:guava:31.0.1-android")
 }

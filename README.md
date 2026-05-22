@@ -41,6 +41,17 @@ For the lights, I followed the same method as described by the paper, with a des
 
 # Step 2 - Acquisition Software
 
+The script to run the ESP8266 is available at [ESP8266.ino](ESP8266\ESP8266.ino). The number of rotations is fixed on 36 (10 degree interval). The ESP creates a WebServer, with a Wi-Fi name and a password. The app sends requests to the ESP, such as: `start`, `stop`, and `continue`. The ESP sends the command `waiting` to the app so it knows when to take the picture.
+
+The [app](scanning_table_app) was made in *Flutter* and **tested on an Android device only**. It has a initial page, only allowing to move to the next page (taking pictures) when the cellphone is connected to the ESP. To start scanning the user first must to choose the folder where the images are going to be saved. After that, the user can click on `Scan` and the app + ESP does the rest automatically. If something goes wrong, the user can click on `stop`, and the operation will be stopped.
+
+The camera settings in the app are following the paper description:
+- Apperture of f/1.2;
+- Shutter speed of 1/4s;
+- ISO 200;
+
+**Important reminder: to connect with the ESP, the mobile data must be turned off**
+
 # Step 3 - Taking Images
 
 # Step 4 - Camera Geometry Estimation

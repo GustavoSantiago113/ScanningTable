@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'pages/pages.dart';
 
 const kPrimary = Color(0xFF05989E);
 const kDark = Color(0xFF3C444B);
+const kEspBaseUrl = 'http://192.168.4.1';
+const kEspSsid = 'ESP_Motor_WS';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,13 +26,13 @@ class ScanningTableApp extends StatelessWidget {
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: kPrimary),
         useMaterial3: true,
-        scaffoldBackgroundColor: kDark,
-        textTheme: const TextTheme(
-          headlineLarge: TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 28),
-          headlineSmall: TextStyle(fontWeight: FontWeight.w500, color: Colors.white, fontSize: 18),
+        scaffoldBackgroundColor: Colors.white,
+        textTheme: GoogleFonts.crimsonTextTextTheme(Theme.of(context).textTheme).copyWith(
+          headlineLarge: GoogleFonts.crimsonText(fontSize: 28, fontWeight: FontWeight.bold, color: kDark),
+          headlineSmall: GoogleFonts.crimsonText(fontSize: 18, fontWeight: FontWeight.w500, color: kDark),
         ),
-      ),  
-      home: HomeScreen(cameras: cameras),
+      ),
+      home: InitialPage(cameras: cameras),
     );
   }
 }

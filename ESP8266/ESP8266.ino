@@ -19,6 +19,8 @@ Stepper stepper(STEPS_PER_REV, IN1, IN3, IN2, IN4);
 // Microsecond delay between individual micro-steps (increase to slow down)
 const unsigned int STEP_DELAY_US = 2000; // was 1000
 
+#define DEFAULT_STOPS 36
+
 // --- HTTP Server ---
 ESP8266WebServer server(80);
 
@@ -137,22 +139,22 @@ void handleStatus() {
 
 void handleStart() {
   int turns = 0;
-  int stops = 0;
   if (server.hasArg("turns")) turns = server.arg("turns").toInt();
-  if (server.hasArg("stops")) stops = server.arg("stops").toInt();
 
-  if (turns > 0 && stops > 0) {
-    long totalSteps = STEPS_PER_REV * turns;
+  // Always use DEFAULT_STOPS stops; ignore any stops parameter from client
+  if (turns > 0) {
+    const int stops = DEFAULT_STOPS;
+    long totalSteps = (long)STEPS_PER_REV * (long)turns;
     stepsPerStop = totalSteps / stops;
     totalStops = stops;
     currentStop = 0;
     running = true;
     waitingForContinue = false;
-    Serial.printf("START %d turns, %d stops (stepsPerStop=%ld)\n", turns, stops, stepsPerStop);
+    Serial.printf("START %d turns, %d stops (stepsPerStop=%ld)\\n", turns, stops, stepsPerStop);
     sendOk("STARTED");
     moveOneSegment();
   } else {
-    server.send(400, "text/plain", "Invalid args. Use POST /start?turns=<n>&stops=<m>");
+    server.send(400, "text/plain", "Invalid args. Use POST /start?turns=<n>");
   }
 }
 
