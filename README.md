@@ -54,6 +54,22 @@ The camera settings in the app are following the paper description:
 
 # Step 3 - Taking Images
 
+The camera was positioned just like described in the paper: at 40 degrees to the table and at 25cm distant.
+
+Just like in the paper, I took some sets of different angles of the object (a 32mm scale minitature painted by me). The sets are in the folder [images](images/). Some examples:
+
+**<center>Set 1:</center>**
+
+<img src="images\set_1\stop_18_20260601_192427.jpg" width="300" height="300">
+
+**<center>Set 2:</center>**
+
+<img src="images\set_2\stop_04_20260601_192618.jpg" width="300" height="300">
+
+**<center>Set 3:</center>**
+
+<img src="images\set_3\stop_14_20260601_192936.jpg" width="300" height="300">
+
 # Step 4 - Camera Geometry Estimation
 
 # Step 5 - Dense Point Cloud Reconstruction
