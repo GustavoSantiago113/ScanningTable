@@ -60,7 +60,7 @@ Just like in the paper, I took some sets of different angles of the object (a 32
 
 **<center>Set 1:</center>**
 
-<img src="images\set_1\stop_18_20260601_192427.jpg" width="300" height="300">
+<img src="images\set_1\set_1/stop_01_20260701_141633.jpg" width="300" height="300">
 
 **<center>Set 2:</center>**
 
