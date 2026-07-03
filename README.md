@@ -73,40 +73,35 @@ Just like in the paper, I took some sets of different angles of the object (a 32
 # Step 4 - Camera Geometry Estimation
 
 Implemented in [camera_geometry_estimation.ipynb](camera_geometry_estimation.ipynb), using
-[pycolmap](https://github.com/colmap/pycolmap) for feature extraction, matching and pose
-estimation. The pipeline follows the paper: a sequence of virtual "photographs" of the calibration
+[pycolmap](https://github.com/colmap/pycolmap) for feature extraction, matching and bundle
+adjustment. The pipeline follows the paper: a sequence of virtual "photographs" of the calibration
 plate is rendered from known viewpoints (paper spec: 12 views, 30&deg; apart, 45&deg; elevation;
 the notebook defaults to 24 views/15&deg; steps for denser real-photo coverage - see its parameters
-cell to reproduce the literal paper spec), registered at their exact known intrinsics/pose, and
-used as a fixed calibration model that the real photographs are localised against (virtual
-poses/intrinsics stay fixed throughout; only the real cameras are estimated/refined). The virtual
-photographs are then removed, leaving calibrated real cameras plus a sparse point cloud, ready for
-dense reconstruction.
+cell to reproduce the literal paper spec), registered with COLMAP at their exact known
+intrinsics/pose, and used as a fixed calibration model that the real photographs are localised
+against via incremental bundle adjustment (`fix_existing_frames` + `constant_cameras` keep the
+virtual poses/intrinsics fixed throughout; only the real cameras are refined). A final
+retriangulation pass (using every registered camera, not just the virtual ones) then fills out the
+sparse point cloud with the artefact's own geometry, not just the calibration plate, before the
+virtual photographs are removed, leaving calibrated real cameras plus a sparse point cloud ready
+for dense reconstruction.
 
-Two things this replica needed that the paper's summary doesn't spell out:
-- **Real photos only reliably match against a virtual view when reasonably close in azimuth to
-  one.** Matching a clean, synthetic render against a real photograph (different lighting, print
-  quality, JPEG compression, lens blur) is much harder than matching two real photos to each other.
-- **Real cameras are localised one photo at a time via direct 2D-3D PnP
-  (`pycolmap.estimate_and_refine_absolute_pose`), not COLMAP's incremental-mapping registration
-  loop.** That more standard tool turned out to have a reproducible bug in this rig/frame
-  configuration (many virtual frames fixed in one rig, many real frames growing in another): several
-  real cameras' poses would silently collapse to an identical, wrong value instead of being
-  independently estimated. It reproduced across every image set and parameter combination tried, so
-  is treated as a library issue rather than something to tune around - registering each photo as its
-  own isolated PnP problem sidesteps it entirely. Camera intrinsics are then jointly refined once
-  across all registered real cameras, and a final retriangulation pass (using every registered
-  camera, not just the virtual ones) fills out the sparse point cloud with the artefact's own
-  geometry, not just the calibration plate.
+One thing this replica needed that the paper's summary doesn't spell out: **real photos only
+reliably register when close in azimuth to a virtual view.** Matching a clean, synthetic render
+against a real photograph (different lighting, print quality, JPEG compression, lens blur) is much
+harder than matching two real photos to each other - hence the denser 24-view default above.
 
-Not every real photograph is guaranteed to register - the notebook reports how many did, and
-includes plausibility filters (implausible camera-to-plate distance, near-duplicate positions) that
-discard failed estimates rather than keep them. Across all three image sets (36 real photographs
-each), a typical run registers 29-32 of them, with the final (post-retriangulation) sparse cloud at
-a mean reprojection error of ~1.1-1.7 px. Pose precision - how cleanly the registered cameras form
-the expected circular rig trajectory - varies by capture session; a single planar calibration target
-is a classically poorly-conditioned pose-estimation problem, and some individual photos land
-further from the true pose than others despite passing the plausibility filters.
+Not every real photograph is guaranteed to register - the notebook reports how many did, and is
+intentionally bounded to a fixed runtime (`MAX_RUNTIME_SECONDS`, `MAX_REG_TRIALS=1`) rather than
+retrying indefinitely. Registration also includes plausibility filters (implausible
+camera-to-plate distance, near-duplicate positions from COLMAP's linear solver failing on a
+poorly-conditioned planar-target fit) that discard failed estimates rather than keep them. On
+`set_1`, a typical run registers ~31/36 real photographs cleanly, forming the expected circular
+rig trajectory, with sub-pixel mean reprojection error. This approach is markedly less reliable on
+`set_2`/`set_3` - COLMAP's incremental-mapping registration doesn't consistently pick up real
+cameras for those sets under this rig/frame configuration (many virtual-fixed frames in one rig,
+real frames growing in another); if you hit that, consider tuning `ABS_POSE_MIN_NUM_INLIERS` /
+`N_VIRTUAL_VIEWS` for the affected set, or re-running with a higher `MAX_REG_TRIALS`.
 
 # Step 5 - Dense Point Cloud Reconstruction
 

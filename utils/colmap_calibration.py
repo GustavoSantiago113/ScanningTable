@@ -4,15 +4,14 @@ Pipeline (see the paper's Section on Camera Properties and Geometry Estimation):
   1. Extract SIFT features for the virtual calibration photographs, telling COLMAP
      their intrinsics exactly (they are synthetic, so we know K exactly).
   2. Extract SIFT features for the real photographs with a physically-motivated
-     initial focal length (see `estimate_focal_length_px`) that is kept fixed
-     throughout - see the note on `register_real_cameras` for why this isn't
-     refined further.
+     initial focal length (see `estimate_focal_length_px`) that bundle adjustment
+     refines further.
   3. Match everything exhaustively (virtual<->virtual, virtual<->real, real<->real).
   4. Seed a reconstruction containing only the virtual images at their known,
      exact poses, and triangulate the plate's 3D points from it.
-  5. Localise each real photograph against that fixed model independently, via
-     direct 2D-3D PnP (RANSAC + refinement) - see `register_real_cameras` for why
-     this doesn't use COLMAP's incremental-mapping registration loop.
+  5. Continue incremental mapping from that seed with the virtual frames fixed
+     (`fix_existing_frames`) and their camera kept constant (`constant_cameras`),
+     so bundle adjustment only ever refines the real cameras' pose + intrinsics.
   6. Strip the virtual images out of the final reconstruction.
 """
 
@@ -21,8 +20,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pycolmap
-
-from utils import plate_geometry
 
 
 def estimate_focal_length_px(
@@ -206,179 +203,82 @@ def triangulate_seed(
     )
 
 
-def _camera_center(cam_from_world: pycolmap.Rigid3d) -> np.ndarray:
-    R = cam_from_world.rotation.matrix()
-    t = np.array(cam_from_world.translation)
-    return -R.T @ t
-
-
-def _mirror_pose_across_plate(cam_from_world: pycolmap.Rigid3d) -> pycolmap.Rigid3d:
-    """Reflect a camera pose through the plate's plane (Z=0).
-
-    A camera localised only against points lying on a single plane (here, the
-    calibration plate's triangulated points) has a well-known two-fold pose ambiguity:
-    reflecting the camera centre through the plane and rebuilding a fresh
-    look-at-the-origin rotation (`plate_geometry.look_at_origin`) gives a second pose
-    with *identical* reprojection error to the first - confirmed empirically (refining
-    from the mirrored pose leaves it unmoved, i.e. it's already a local optimum, not
-    just a plausible guess). `estimate_and_refine_absolute_pose`'s RANSAC has no way to
-    prefer one side over the other, so it silently returns whichever it lands on first;
-    since the real rig always mounts the camera above the turntable, the positive-Z
-    solution is always the physically correct one.
-    """
-    mirrored_center = _camera_center(cam_from_world) * np.array([1.0, 1.0, -1.0])
-    R2, t2 = plate_geometry.look_at_origin(mirrored_center)
-    return pycolmap.Rigid3d(pycolmap.Rotation3d(R2), t2)
-
-
 def register_real_cameras(
     db_path: Path,
-    seed_triangulated: pycolmap.Reconstruction,
-    virtual_rel_names: list[str],
-    real_rel_names: list[str],
+    work_dir: Path,
+    seed_triangulated_dir: Path,
+    output_dir: Path,
+    virtual_camera_id: int,
     abs_pose_min_num_inliers: int = 15,
-    abs_pose_max_error: float = 12.0,
     abs_pose_min_inlier_ratio: float = 0.1,
+    max_reg_trials: int = 1,
+    max_runtime_seconds: int = 300,
     random_seed: int = 0,
     num_threads: int = 1,
-) -> tuple[pycolmap.Reconstruction, list[str]]:
-    """Localise each real photograph independently against the fixed calibration
-    model, via direct 2D-3D PnP (RANSAC + refinement) rather than COLMAP's
-    incremental-mapping registration loop.
+) -> dict[int, pycolmap.Reconstruction]:
+    """Grow the reconstruction onto the real images. Virtual frames stay fixed and
+    their camera intrinsics stay constant; only the real cameras' pose and
+    intrinsics (focal length + distortion) are refined by bundle adjustment.
 
-    This deliberately bypasses `pycolmap.incremental_mapping`/`IncrementalMapper`.
-    That path (COLMAP's standard incremental-SfM registration) turned out to have a
-    reproducible bug in this rig/frame configuration - many virtual-fixed frames in
-    one rig, many growing real frames in another - where several real cameras'
-    poses would silently collapse to an identical, wrong value instead of being
-    independently estimated (visible as repeated Ceres "Unable to perform dense
-    Cholesky factorization" warnings immediately before the collapse). It reproduced
-    across multiple image sets and parameter combinations, so is treated as a library
-    issue in this pycolmap build rather than something to route around with tuning.
+    The absolute-pose RANSAC thresholds are relaxed from COLMAP's defaults
+    (min 30 inliers / 0.25 ratio): a real photo only matches a handful of virtual
+    renders well (different appearance domains - clean synthetic render vs. a
+    printed pattern under real lighting/lens blur), so demanding the same
+    match volume as real-vs-real photo pairs is unrealistic.
 
-    Each real photo's pose comes from its own `estimate_and_refine_absolute_pose`
-    call: 2D keypoints in the real photo, matched (via the database's stored,
-    geometrically-verified two-view matches) to the 3D points the virtual cameras
-    already triangulated. Every real camera is therefore an independent LO-RANSAC +
-    non-linear pose refinement - no shared mutable state between images, so the
-    collapse bug above has no path to occur.
+    `max_reg_trials=1` and `max_runtime_seconds` bound the worst case: some real
+    photographs may just not carry enough calibration-plate signal to localise
+    (e.g. the plate mostly occluded by the artefact at that rotation), and
+    COLMAP's default of retrying each stubborn candidate 3x is very slow once a
+    few dozen images are in play. Not every real photograph is guaranteed to
+    register - the notebook reports how many did.
 
-    Camera intrinsics (focal length, distortion) are never refined, only pose -
-    deliberately, not just for lack of a per-image implementation. A joint bundle
-    adjustment across all real cameras' shared intrinsics (tried and removed) is a
-    second, independent way this rig/frame configuration misbehaves: regardless of
-    which parameters are held constant, it reproducibly diverges once more than a
-    handful of real cameras are involved (focal length or camera positions running
-    off to absurd values, "NO_CONVERGENCE" after hitting the iteration cap). Some of
-    that is inherent to the problem, not just this library - all the correspondences
-    used to localise the real cameras lie on a single (near-)planar target, and
-    jointly fitting focal length from a planar target's observations is a classically
-    ill-conditioned problem (focal length and depth/distance trade off against each
-    other almost for free). `estimate_focal_length_px`'s EXIF-derived starting guess
-    is used as the final focal length instead.
-
-    Returns (reconstruction, registered_real_names) - the reconstruction contains
-    the fixed virtual cameras (unchanged) plus every real camera that met
-    `abs_pose_min_num_inliers`.
+    `random_seed` pins COLMAP's PRNG (used by the RANSAC inside absolute-pose
+    estimation), and `num_threads=1` makes the order images are attempted in and
+    the order the PRNG gets drawn from deterministic too - both are needed for
+    reproducible results. Left at COLMAP's defaults (seeded from system time,
+    threads auto), registration outcomes vary dramatically run to run for this
+    dataset - the borderline-inlier-count regime `abs_pose_min_num_inliers`
+    sits right at the boundary of "registers vs. doesn't" for many real photos,
+    and how many photos land on which side of that boundary is exactly what
+    RANSAC's randomness (and the order it's consumed in) perturbs.
     """
-    import copy
+    if output_dir.exists():
+        import shutil
+        shutil.rmtree(output_dir)
 
     pycolmap.set_random_seed(random_seed)
-    db = pycolmap.Database.open(str(db_path))
 
-    real_camera_id = db.read_image_with_name(real_rel_names[0]).camera_id
-    real_camera = db.read_camera(real_camera_id)
+    options = pycolmap.IncrementalPipelineOptions()
+    options.num_threads = num_threads
+    options.fix_existing_frames = True
+    options.constant_cameras = {virtual_camera_id}
+    options.ba_refine_focal_length = True
+    options.ba_refine_principal_point = False
+    options.ba_refine_extra_params = True
+    options.multiple_models = False
+    options.max_runtime_seconds = int(max_runtime_seconds)
+    options.mapper.abs_pose_min_num_inliers = abs_pose_min_num_inliers
+    options.mapper.abs_pose_min_inlier_ratio = abs_pose_min_inlier_ratio
+    options.mapper.max_reg_trials = max_reg_trials
+    options.mapper.random_seed = random_seed
+    options.mapper.num_threads = num_threads
+    options.triangulation.random_seed = random_seed
+    # COLMAP's "structure-less" registration fallback (registers an image from raw 2D-2D
+    # correspondences when it doesn't yet see enough triangulated 3D points) produced degenerate,
+    # near-identical poses for many real cameras in this setup - masked by silent Ceres solver
+    # failures ("Unable to perform dense Cholesky factorization") during the bundle adjustment
+    # that should have corrected them. Disabling it registers fewer real cameras, but every
+    # registered pose is then actually independently estimated from real 2D-3D correspondences.
+    options.structure_less_registration_fallback = False
 
-    result = copy.deepcopy(seed_triangulated)
-    result.add_camera_with_trivial_rig(real_camera)
-
-    estimation_opts = pycolmap.AbsolutePoseEstimationOptions()
-    estimation_opts.ransac.max_error = abs_pose_max_error
-    estimation_opts.ransac.min_inlier_ratio = abs_pose_min_inlier_ratio
-    estimation_opts.ransac.random_seed = random_seed
-    estimation_opts.ransac.num_threads = num_threads
-
-    refinement_opts = pycolmap.AbsolutePoseRefinementOptions()
-    refinement_opts.refine_focal_length = False
-    refinement_opts.refine_extra_params = False
-
-    registered_names = []
-    for real_name in real_rel_names:
-        real_db_image = db.read_image_with_name(real_name)
-        real_id = real_db_image.image_id
-        real_keypoints = db.read_keypoints(real_id)
-
-        # Candidate 2D-3D correspondences for RANSAC. Deliberately *not* deduplicated
-        # by real keypoint index here: the same real keypoint can legitimately get
-        # matched (to the same, correct 3D point) from several virtual viewpoints, and
-        # that redundancy is useful signal for RANSAC, not noise.
-        candidate_real_idxs = []
-        candidate_point3D_ids = []
-        for virtual_name in virtual_rel_names:
-            virtual_id = db.read_image_with_name(virtual_name).image_id
-            a, b = min(virtual_id, real_id), max(virtual_id, real_id)
-            if not db.exists_two_view_geometry(a, b):
-                continue
-            inlier_matches = db.read_two_view_geometry(a, b).inlier_matches
-            if len(inlier_matches) == 0:
-                continue
-            virtual_image = seed_triangulated.find_image_with_name(virtual_name)
-            for idx_a, idx_b in inlier_matches:
-                virtual_idx, real_idx = (int(idx_a), int(idx_b)) if a == virtual_id else (int(idx_b), int(idx_a))
-                p2d_virtual = virtual_image.points2D[virtual_idx]
-                if not p2d_virtual.has_point3D():
-                    continue
-                candidate_real_idxs.append(real_idx)
-                candidate_point3D_ids.append(p2d_virtual.point3D_id)
-
-        if len(candidate_real_idxs) < abs_pose_min_num_inliers:
-            continue
-
-        points2D = [real_keypoints[i][:2] for i in candidate_real_idxs]
-        points3D = [seed_triangulated.point3D(pid).xyz for pid in candidate_point3D_ids]
-
-        points2D_arr = np.array(points2D)
-        points3D_arr = np.array(points3D)
-        pose = pycolmap.estimate_and_refine_absolute_pose(
-            points2D_arr, points3D_arr, real_camera,
-            estimation_options=estimation_opts, refinement_options=refinement_opts,
-        )
-        if pose is None or pose["num_inliers"] < abs_pose_min_num_inliers:
-            continue
-
-        # The plate's triangulated points are (near-)coplanar, so this PnP solve has a
-        # two-fold ambiguity (see `_mirror_pose_across_plate`) and RANSAC has no reason
-        # to prefer the physically-correct side. Flip back whenever it lands the camera
-        # below the turntable. No re-refinement afterwards: the mirrored pose already has
-        # the same reprojection error as the one `estimate_and_refine_absolute_pose` just
-        # refined (that's the ambiguity), and re-running `refine_absolute_pose` from it is
-        # actively harmful - observed to occasionally diverge to a wildly wrong pose,
-        # since it's initialised exactly at a symmetric point where the problem is poorly
-        # conditioned.
-        if _camera_center(pose["cam_from_world"])[2] < 0:
-            pose["cam_from_world"] = _mirror_pose_across_plate(pose["cam_from_world"])
-
-        # Keep every detected keypoint (not just the candidates used for pose
-        # estimation) so the image's Point2D indices line up with the database's
-        # keypoint indices - needed for `add_observation` below and for any later
-        # re-triangulation from this image.
-        image = pycolmap.Image(
-            name=real_name, keypoints=real_keypoints[:, :2],
-            camera_id=real_camera.camera_id, image_id=real_id,
-        )
-        result.add_image_with_trivial_frame(image, pose["cam_from_world"])
-
-        # One observation per real keypoint index (a Point2D can only reference one
-        # Point3D): keep the first inlier correspondence seen for each index.
-        added_real_idxs = set()
-        for real_idx, point3D_id, is_inlier in zip(candidate_real_idxs, candidate_point3D_ids, pose["inlier_mask"]):
-            if is_inlier and real_idx not in added_real_idxs:
-                result.add_observation(point3D_id, pycolmap.TrackElement(real_id, real_idx))
-                added_real_idxs.add(real_idx)
-
-        registered_names.append(real_name)
-
-    return result, registered_names
+    return pycolmap.incremental_mapping(
+        database_path=db_path,
+        image_path=work_dir,
+        output_path=output_dir,
+        options=options,
+        input_path=seed_triangulated_dir,
+    )
 
 
 def filter_implausible_real_cameras(
@@ -433,11 +333,11 @@ def filter_degenerate_real_cameras(
     virtual_rel_names: set[str],
     min_separation_mm: float = 20.0,
 ) -> list[str]:
-    """Some real cameras can converge to near-duplicate poses when their independent
-    PnP refinement (in `register_real_cameras`) fails to move a degenerate initial
-    guess - a poorly-conditioned-optimisation failure mode that shows up when localising
-    monocular cameras against a single planar target. Real photos were taken at
-    different physical table rotations, so two registered real
+    """Some real cameras can converge to near-duplicate poses when bundle adjustment's
+    linear solver fails to refine a copied initial guess (visible as "Unable to perform
+    dense Cholesky factorization" warnings) - a poorly-conditioned-optimisation failure
+    mode that shows up when localising monocular cameras against a single planar target.
+    Real photos were taken at different physical table rotations, so two registered real
     cameras ending up implausibly close together indicates one (or both) never actually
     got refined away from a bad initial guess, not a genuine coincidence.
 
