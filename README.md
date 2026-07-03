@@ -54,21 +54,21 @@ The camera settings in the app are following the paper description:
 
 # Step 3 - Taking Images
 
-The camera was positioned just like described in the paper: at 40 degrees to the table and at 25cm distant.
+The camera was positioned a little bit different than described in the paper. Instead of at 40 degrees to the table and at 25cm distant, as describred, the images were took framing the whole calibration pattern, at less than 40 degrees. The reason for this is that phones have different focals, meaning that the images from different phones will become different, even if you keep the same parameters. *When doing this on your phone, try to make the board occupy the maximum of the image as possible and at low angles*.
 
 Just like in the paper, I took some sets of different angles of the object (a 32mm scale minitature painted by me). The sets are in the folder [images](images/). Some examples:
 
-**<center>Set 1:</center>**
+**<center>Set 1:**
 
-<img src="images/set_1/stop_01_20260701_141633.jpg" width="300" height="300">
+<img src="images\set_1\stop_03_20260703_163620.jpg" width="300" height="300"></center>
 
-**<center>Set 2:</center>**
+**<center>Set 2:**
 
-<img src="images/set_2/stop_01_20260701_164136.jpg" width="300" height="300">
+<img src="images\set_2\stop_03_20260703_163907.jpg" width="300" height="300"></center>
 
-**<center>Set 3:</center>**
+**<center>Set 3:**
 
-<img src="images/set_3/stop_01_20260701_164332.jpg" width="300" height="300">
+<img src="images\set_3\stop_07_20260703_164243.jpg" width="300" height="300"></center>
 
 # Step 4 - Camera Geometry Estimation
 
