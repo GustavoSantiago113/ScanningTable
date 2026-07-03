@@ -395,6 +395,15 @@ def filter_degenerate_real_cameras(
 def strip_virtual_images(recon: pycolmap.Reconstruction, virtual_rel_names: set[str]) -> pycolmap.Reconstruction:
     """Return a copy of the reconstruction with the virtual calibration images
     deregistered, leaving only the real cameras and the points they observe.
+
+    `write()` on the result only ever serialises *registered* images, so the
+    virtual photographs are already fully absent from anything written to disk
+    even without this function - `deregister_frame` alone is enough for that.
+    What it doesn't do is remove the virtual camera/rig objects themselves, which
+    stick around unused (`pruned.summary()` still reports them in `num_cameras` /
+    `num_rigs` - `num_reg_frames` is the count that actually reflects what's
+    active). This also drops those now-unreferenced camera/rig entries, so the
+    written `cameras.bin` doesn't carry an orphaned virtual camera model either.
     """
     import copy
 
@@ -402,8 +411,14 @@ def strip_virtual_images(recon: pycolmap.Reconstruction, virtual_rel_names: set[
     virtual_frame_ids = [
         img.frame_id for img in pruned.images.values() if img.name in virtual_rel_names
     ]
+    virtual_camera_ids = {
+        img.camera_id for img in pruned.images.values() if img.name in virtual_rel_names
+    }
     for frame_id in virtual_frame_ids:
         pruned.deregister_frame(frame_id)
+    for camera_id in virtual_camera_ids:
+        del pruned.rigs[camera_id]
+        del pruned.cameras[camera_id]
     return pruned
 
 

@@ -95,12 +95,7 @@ Not every real photograph is guaranteed to register - the notebook reports how m
 intentionally bounded to a fixed runtime (`MAX_RUNTIME_SECONDS`, `MAX_REG_TRIALS=1`) rather than
 retrying indefinitely. Registration also includes plausibility filters (implausible
 camera-to-plate distance, near-duplicate positions from COLMAP's linear solver failing on a
-poorly-conditioned planar-target fit) that discard failed estimates rather than keep them. On
-`set_1`, a typical run registers ~31/36 real photographs cleanly, forming the expected circular
-rig trajectory, with sub-pixel mean reprojection error. This approach is markedly less reliable on
-`set_2`/`set_3` - COLMAP's incremental-mapping registration doesn't consistently pick up real
-cameras for those sets under this rig/frame configuration (many virtual-fixed frames in one rig,
-real frames growing in another); if you hit that, consider tuning `ABS_POSE_MIN_NUM_INLIERS` /
+poorly-conditioned planar-target fit) that discard failed estimates rather than keep them. If you hit not getting real cameras, consider tuning `ABS_POSE_MIN_NUM_INLIERS` /
 `N_VIRTUAL_VIEWS` for the affected set, or re-running with a higher `MAX_REG_TRIALS`.
 
 # Step 5 - Dense Point Cloud Reconstruction
