@@ -1,0 +1,5 @@
+{
+  "z_lower_limit_mm": 6.0,
+  "z_upper_limit_mm": 24.0,
+  "pattern_size_mm": 130.0
+}

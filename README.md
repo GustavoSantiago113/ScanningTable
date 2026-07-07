@@ -158,13 +158,35 @@ doesn't need to deal with:
   the artefact (likely a specular-highlight fusion ghost) - visible as a gap in point density
   between the artefact's own tapering mass and that clump. `cropping.find_upper_z_limit` cuts at
   the first sufficiently-thick run of near-empty slices above the lower limit. It's a narrow,
-  generic density-gap heuristic, not a general outlier remover - Step 8 (Merge and Pruning) still
-  has real pruning work to do on whatever survives cropping.
+  generic density-gap heuristic, not a general outlier remover - Step 7 (Point Cloud
+  Registration)'s own merge stage still has real pruning work to do on whatever survives cropping.
 
 # Step 7 - Point Cloud Registration
 
-# Step 8 - Merge and Pruning
+Implemented in [point_cloud_registration.ipynb](point_cloud_registration.ipynb). This covers the
+paper's full Section 2.4.4 - registration *and* the confidence-weighted merge it also describes,
+since the paper treats both under one heading. Each of `set_1`-`set_3` was captured with the
+object resting differently on the turntable, so Step 6's three cropped point-clouds are genuine
+partial views, each in its own independent frame, that need combining:
 
-# Step 9 - Surface Mesh Reconstruction
+1. **Coarse alignment** - paper spec: Super4PCS. No maintained pip package or Python binding
+   exists for either 4PCS or Super4PCS, so `utils/registration.py`'s `coarse_align` implements the
+   same family of algorithm from scratch: a RANSAC search over congruent point triples (matching
+   pairwise distances, scored by largest-common-pointset overlap) rather than Mellado et al.'s
+   specific coplanar-4-point/smart-indexing formulation - that indexing is what makes Super4PCS
+   *fast*; it doesn't change what a correct coarse alignment looks like.
+2. **Fine alignment** - a Weighted ICP (`weighted_icp`), exactly as described: each nearest-
+   neighbour correspondence is weighted by the product of its two points' confidence values
+   (Equation 3), so precisely-reconstructed points dominate the fit.
+3. **Confidence** (Equation 2) needs a per-point surface normal, which Step 5's `pycolmap`-based
+   dense reconstruction doesn't preserve (its `Reconstruction` object drops the photo-consistency
+   normals PatchMatchStereo/StereoFusion compute internally). `estimate_normals` substitutes a
+   standard PCA-over-local-neighbours normal, oriented outward from the cloud's own centroid.
+4. **Merge** (Equation 4): once registered, close point pairs across clouds are confidence-
+   weighted-interpolated into one rather than kept as two redundant, possibly conflicting points;
+   unique points are kept as-is. This also does this replica's pruning - there's no separate
+   pruning stage.
 
-# Step 10 - Texturing
+# Step 8 - Meshing
+
+# Step 9 - Texturing
