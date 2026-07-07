@@ -4,6 +4,8 @@
 
 **Non-official implementation and adaptation of the paper: [Automated Low-Cost Photogrammetric Acquisition of 3D Models from Small Form-Factor Artefacts](https://www.mdpi.com/2079-9292/8/12/1441), from Collins et al., 2019**
 
+**Note:** This implementation was performed in a **Linux** environment, with GPU with CUDA acceleration.
+
 </div>
 
 ---
@@ -73,7 +75,7 @@ Just like in the paper, I took some sets of different angles of the object (a 32
 # Step 4 - Camera Geometry Estimation
 
 Implemented in [camera_geometry_estimation.ipynb](camera_geometry_estimation.ipynb), using
-[pycolmap](https://github.com/colmap/pycolmap) for feature extraction, matching and bundle
+[pycolmap with cuda](https://github.com/colmap/pycolmap) for feature extraction, matching and bundle
 adjustment. The pipeline follows the paper: a sequence of virtual "photographs" of the calibration
 plate is rendered from known viewpoints (paper spec: 12 views, 30&deg; apart, 45&deg; elevation;
 the notebook defaults to 24 views/15&deg; steps for denser real-photo coverage - see its parameters
@@ -99,6 +101,33 @@ poorly-conditioned planar-target fit) that discard failed estimates rather than 
 `N_VIRTUAL_VIEWS` for the affected set, or re-running with a higher `MAX_REG_TRIALS`.
 
 # Step 5 - Dense Point Cloud Reconstruction
+
+Implemented in [dense_reconstruction.ipynb](dense_reconstruction.ipynb). The paper uses CMVS/PMVS
+(Furukawa's clustering-views-for-multi-view-stereo toolchain) for this step. That toolchain has no
+pip package, is unmaintained, and COLMAP's own docs describe it as superseded by COLMAP's own dense
+pipeline - **PatchMatchStereo** (per-image depth/normal maps) followed by **StereoFusion** (merging
+those into one point cloud) - which this notebook uses instead, via the same `pycolmap` library
+already used for calibration.
+
+The pipeline: load Step 4's calibrated real cameras and reuse the exact downscaled photographs it
+already calibrated against (`outputs/<set>/work`, no separate re-downscale needed) &rarr; undistort
+into a COLMAP dense workspace &rarr; PatchMatchStereo for per-image depth/normal maps &rarr;
+StereoFusion into one dense, coloured point cloud &rarr; restrict to a rough region of interest
+around the artefact (not the paper's dedicated cropping stage, which comes later) &rarr; attempt to
+downsample towards target point densities (points per mm&sup2; of the ROI's bounding-box surface
+area, standing in for actual surface area until a mesh exists).
+
+**On target density**: this step was scoped for 100 and 300 points/mm&sup2;. Validated on `set_1`
+(35 photos, downscaled to 2000x1500 as Step 4 left them), the achieved density came out to
+**~6 points/mm&sup2;** - one to two orders of magnitude below either target. The notebook keeps
+both targets as explicit parameters and reports the honest gap (via
+`dense_reconstruction.downsample_to_density`'s `reached_target=False` path) rather than silently
+substituting a different number or fabricating points a camera never actually resolved. This is a
+property of the input photos (phone camera, ~20-25cm working distance, downscaled for tractable
+runtime) more than the algorithm - raising Step 4's `MAX_LONG_EDGE` (more pixels on the artefact per
+photo) and/or taking more, closer photos would likely close some of that gap, at the cost of a much
+longer `PatchMatchStereo` runtime (full 4000x3000 photos measured ~60-90s/image on the dev GPU,
+vs. ~35 minutes total for all of `set_1` at 2000x1500). Even though the poits density were not as high as stated in the paper, the reconstruction level of details is impressive.
 
 # Step 6 - Cropping
 

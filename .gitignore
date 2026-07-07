@@ -7,3 +7,7 @@ outputs/*/work/
 outputs/*/*.db
 outputs/*/*.db-shm
 outputs/*/*.db-wal
+outputs/*/dense/work/
+outputs/*/dense/workspace/
+outputs/*/dense/sparse/
+outputs/*/dense/fused/
