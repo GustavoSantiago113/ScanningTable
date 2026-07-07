@@ -127,9 +127,39 @@ property of the input photos (phone camera, ~20-25cm working distance, downscale
 runtime) more than the algorithm - raising Step 4's `MAX_LONG_EDGE` (more pixels on the artefact per
 photo) and/or taking more, closer photos would likely close some of that gap, at the cost of a much
 longer `PatchMatchStereo` runtime (full 4000x3000 photos measured ~60-90s/image on the dev GPU,
-vs. ~35 minutes total for all of `set_1` at 2000x1500). Even though the poits density were not as high as stated in the paper, the reconstruction level of details is impressive.
+vs. ~35 minutes total for all of `set_1` at 2000x1500). Even though the poits density were not as high as stated in the paper, the reconstruction level of details is *impressive*.
 
 # Step 6 - Cropping
+
+Implemented in [cropping.ipynb](cropping.ipynb). The paper's method: an axis-aligned crop box
+with x/y extent equal to the calibration pattern's own size (130&times;130&nbsp;mm, centred at
+the world origin, since the calibration model is defined at z&nbsp;=&nbsp;0), and a z lower-limit
+found by sliding a 1&nbsp;mm slab upward from 2&nbsp;mm above the turntable, averaging point
+luminosity, until it crosses a threshold - the point where dark supporting material gives way to
+the lighter artefact.
+
+Three things came up validating this against real data (`set_1`-`set_3`) that the paper's setup
+doesn't need to deal with:
+
+- **A Step 4 orientation bug.** This replica's real-camera reconstruction comes out mirrored
+  through the z&nbsp;=&nbsp;0 plane - the artefact reconstructs *below* the turntable instead of
+  above it, almost certainly Step 4's own coplanar-target pose ambiguity (see
+  `plate_geometry.look_at_origin`'s docstring) resolving to the wrong sign for this rig.
+  `cropping.correct_z_axis_inversion` negates z as a workaround at the data-consumption end so the
+  rest of the crop logic (written straight from the paper, which assumes the artefact sits above
+  the turntable) applies correctly. The proper fix belongs in `colmap_calibration.py`'s pose
+  disambiguation, not here.
+- **No dark support material.** The images in `images/set_*` have the miniature sitting directly
+  on the calibration pattern - no foam raiser. In practice this doesn't matter: the model's own
+  paint is darker near its base and lightens further up, enough of a luminosity gradient for the
+  paper's sweep to still land on a sensible lower limit.
+- **A z upper-limit isn't in the paper**, but was added here because this replica's dense
+  reconstruction consistently leaves one small clump of disconnected debris floating well above
+  the artefact (likely a specular-highlight fusion ghost) - visible as a gap in point density
+  between the artefact's own tapering mass and that clump. `cropping.find_upper_z_limit` cuts at
+  the first sufficiently-thick run of near-empty slices above the lower limit. It's a narrow,
+  generic density-gap heuristic, not a general outlier remover - Step 8 (Merge and Pruning) still
+  has real pruning work to do on whatever survives cropping.
 
 # Step 7 - Point Cloud Registration
 
