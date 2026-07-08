@@ -18,9 +18,8 @@
 - [Step 5 - Dense Point Cloud Reconstruction](#step-5---dense-point-cloud-reconstruction)
 - [Step 6 - Cropping](#step-6---cropping)
 - [Step 7 - Point Cloud Registration](#step-7---point-cloud-registration)
-- [Step 8 - Merge and Pruning](#step-8---merge-and-pruning)
-- [Step 9 - Surface Mesh Reconstruction](#step-9---surface-mesh-reconstruction)
-- [Step 10 - Texturing](#step-10---texturing)
+- [Step 8 - Meshing](#step-8---meshing)
+- [Step 9 - Texturing](#step-9---texturing)
 
 
 ---
@@ -188,5 +187,28 @@ partial views, each in its own independent frame, that need combining:
    pruning stage.
 
 # Step 8 - Meshing
+
+Implemented in [meshing.ipynb](meshing.ipynb) via `utils/meshing.py`, following the paper's
+Section 2.4.5 directly:
+
+> Following the point-cloud registration and merging operations described above, the points
+> require connecting to form a surface mesh before texturing can be applied. Poisson surface
+> reconstruction was used for this stage and was chosen for its relative simplicity and
+> reliability. Some care is needed to avoid loss of detail on inscribed surfaces. We found that
+> an octree depth of 14 gave a good compromise, retaining the detail of the inscriptions with a
+> tractable computational complexity.
+
+One things came up building this against real data:
+
+- **Poisson reconstructs a phantom "bubble" surface.** Poisson fits one *global* implicit
+  function across the whole point-cloud, so even a handful of points far from everything else -
+  each still gets a plausible local normal - can pull that function's zero-level-set out into a
+  sizeable, completely disconnected surface floating in empty space. Diagnosed on this replica's
+  own merged cloud: 67,805 of 67,820 points form one connected component at a 1.5mm radius, and
+  the rest are 1-4-point fragments (registration/fusion debris, not real geometry) scattered
+  elsewhere. `meshing.remove_isolated_points` removes those from the *point-cloud*, before Poisson
+  ever sees them, rather than trying to identify and trim the mesh it produces from them
+  afterwards - which needs the (expensive) reconstruction to have already run once just to find
+  out.
 
 # Step 9 - Texturing
