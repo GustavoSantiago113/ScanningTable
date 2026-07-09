@@ -212,3 +212,53 @@ One things came up building this against real data:
   out.
 
 # Step 9 - Texturing
+
+Implemented in [texturing.ipynb](texturing.ipynb) via `utils/texturing.py`, following the
+paper's Section 2.4.6: project the original photographs onto Step 8's mesh using the camera
+positions from Step 4's calibration. Each registered real camera is carried through this
+replica's own Step 4 &rarr; Step 8 chain into the mesh's common frame - this replica's version
+of the paper's "VmnMn" (camera Vmn transformed by the per-acquisition model-matrix Mn):
+
+- **The z-axis correction has no valid rigid-body camera analogue.** Step 6 corrects the
+  *points* by negating z outright (`cropping.correct_z_axis_inversion`) - a reflection, not a
+  rotation, so there's no way to move a *camera* the same way and still call the result a
+  physically normal camera. `texturing.flip_z_camera_pose` derives the (improper, but
+  correctly-reprojecting) substitute instead: composing the original camera rotation with the
+  z-flip *on the right* reprojects corrected-frame points onto exactly the same pixels the
+  original, unmirrored camera always did, even though the resulting matrix has det = -1. This
+  was validated against this replica's own real cameras, not just derived on paper: repositioned
+  into the mesh's common frame, all 100 registered real cameras across the three sets look at
+  the mesh's own centroid to within about 6-10&deg; (the notebook's own sanity-check step) -
+  before landing on this formula, they were off by ~173&deg;, i.e. facing almost exactly
+  backwards.
+- **Step 7's registration transform** carries the camera the same way
+  `registration.apply_transform` carries points (`texturing.compose_with_registration`).
+
+The paper's own tool for this step is MeshLab (via UV-atlas texturing from registered
+cameras). `pymeshlab`'s equivalent filter turned out to be broken under headless/server
+execution in this environment (a long-standing, version-spanning upstream issue, not specific
+to this setup), so this replica instead uses `open3d` (already a project dependency,
+`meshing.py`) to project every registered, undistorted photo directly onto the mesh and paint
+each *vertex* with the occlusion-aware, multi-view-blended result - not a UV-mapped texture
+atlas, but real photographic colour, correctly occlusion-tested per camera via `open3d`'s own
+`RaycastingScene` (Embree-backed, CPU-only). Two things needed correcting empirically before
+this was trustworthy, not just plausible-looking - both documented in
+`texturing.texture_mesh_vertex_colors`'s own docstring:
+
+- **Ray direction.** Casting the occlusion ray *from* each vertex *towards* the camera
+  routinely self-intersects an adjacent triangle at t &asymp; 0 ("shadow acne") - this mesh is
+  not watertight or edge-manifold (`mesh.is_watertight()` is `False`), so no fixed offset
+  reliably escaped it. Casting *from the camera towards* the vertex instead avoids the problem
+  entirely (the ray origin is never near the mesh surface) and doubles as a proper z-buffer-style
+  visibility test.
+- **Occlusion tolerance.** Initially rejected a vertex whenever the ray hit anything before
+  reaching it, which - audited directly against this replica's own mesh - was rejecting even
+  vertices whose normals point almost exactly at the camera. Tracing a few of those hits showed
+  real geometry several mm to multiple cm away, not numerical noise: this is a small,
+  geometrically complex hand-painted miniature (limbs, weapon, folds), photographed at one fixed
+  camera elevation per set, so most surface points genuinely are only visible from a narrow slice
+  of the ~100 photos across all three sets. A wider tolerance (1.5&nbsp;mm - comfortably above
+  this mesh's own sub-mm surface noise, well below genuine occlusion distances) fixed the
+  false rejections without papering over real ones; final coverage is 77% of vertices coloured
+  directly from a photo, the rest kept their Step 7/8 point-cloud colour rather than being left
+  uncoloured.

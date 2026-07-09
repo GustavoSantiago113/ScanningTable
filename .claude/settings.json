@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/home/gnoceras/ScanningTable/.venv/bin/python -c ' *)",
+      "Bash(timeout 60 /home/gnoceras/ScanningTable/.venv/bin/python -c ' *)",
+      "Bash(git checkout *)",
+      "Bash(git -C /home/gnoceras/ScanningTable status --short)"
+    ]
+  }
+}
