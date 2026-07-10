@@ -74,14 +74,15 @@ class CameraPose:
     t: np.ndarray  # (3,)
 
 
-def load_set_cameras(final_dir: Path, work_dir: Path) -> list[CameraPose]:
-    """Registered real cameras from Step 4's final reconstruction (`outputs/<set>/final`),
-    paired with the working-resolution photograph (`outputs/<set>/work/...`) COLMAP actually
-    calibrated them against - texture sampling needs the same pixel grid the intrinsics were
-    fit to, not the original full-resolution photo (same reasoning `dense_reconstruction.ipynb`
-    already relies on for Step 5).
+def load_set_cameras(recon: pycolmap.Reconstruction, work_dir: Path) -> list[CameraPose]:
+    """Registered real cameras from Step 4's final reconstruction (`recon` - e.g.
+    `pycolmap.Reconstruction(str(outputs/<set>/final))`, or an already-in-memory
+    reconstruction straight from Step 4, no disk round-trip needed), paired with the
+    working-resolution photograph (`outputs/<set>/work/...`) COLMAP actually calibrated them
+    against - texture sampling needs the same pixel grid the intrinsics were fit to, not the
+    original full-resolution photo (same reasoning `dense_reconstruction.ipynb` already relies
+    on for Step 5).
     """
-    recon = pycolmap.Reconstruction(str(final_dir))
     poses = []
     for img in recon.images.values():
         if not img.has_pose:

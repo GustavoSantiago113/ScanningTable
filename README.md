@@ -20,6 +20,7 @@
 - [Step 7 - Point Cloud Registration](#step-7---point-cloud-registration)
 - [Step 8 - Meshing](#step-8---meshing)
 - [Step 9 - Texturing](#step-9---texturing)
+  - [Running the whole pipeline in one go](#running-the-whole-pipeline-in-one-go)
 
 
 ---
@@ -262,3 +263,41 @@ this was trustworthy, not just plausible-looking - both documented in
   false rejections without papering over real ones; final coverage is 77% of vertices coloured
   directly from a photo, the rest kept their Step 7/8 point-cloud colour rather than being left
   uncoloured.
+
+# Running the whole pipeline in one go
+
+Steps 4-9 are also available as a single script, [reconstruct.py](reconstruct.py), instead of
+six notebooks run one at a time by hand. It auto-discovers every set folder under `images/`
+(no `SET_NAME` to edit per run) and drives camera geometry estimation through texturing
+end-to-end, set by set, then registers, meshes, and textures whatever sets made it through:
+
+```
+python reconstruct.py
+```
+
+A few things this script does differently from the notebooks it consolidates, all by design
+rather than oversight:
+
+- **No plots.** The notebooks' `matplotlib`/`open3d` visualisations are for inspecting one run
+  interactively; this script only logs text - including the same "something might be wrong"
+  signals the notebooks otherwise show as a chart to eyeball (a low camera-registration rate, a
+  weak coarse-alignment score, ICP not converging, low vertex-photo coverage, and so on) as
+  `logging.warning` calls instead.
+- **A bad set doesn't sink the run.** Camera geometry, dense reconstruction, and cropping run
+  per set inside a `try`/`except`; a set that fails is logged and skipped, and registration/
+  meshing/texturing proceed with whatever sets are left (at least one has to succeed).
+- **Most intermediates never touch disk.** Cropped points, the merged cloud, the mesh, and each
+  set's registration transform stay as in-memory Python objects passed straight from one stage
+  to the next, rather than round-tripping through the PLY/JSON files separate notebooks need.
+  Only what COLMAP's own file-based API requires (its database, plus several reconstruction/
+  dense-workspace directories) still lands on disk mid-run.
+- **Downscaling is optional.** `--max-long-edge` changes the notebooks' default of 2000px;
+  `--no-downscale` processes the original photographs at full resolution.
+- **Everything intermediate is deleted once texturing finishes**, leaving only
+  `outputs/mesh/mesh.ply` and `outputs/textured/textured.ply` - pass `--keep-intermediates` to
+  leave a run's working files in place instead (e.g. for debugging a failed/flagged set).
+
+**Requires a CUDA GPU** (Step 5, PatchMatchStereo, has no CPU fallback) - the script checks for
+one via `nvidia-smi` at startup and logs a warning rather than failing silently deep into the
+first set if none is found. See `python reconstruct.py --help` for the full list of overrides
+(sets to include, reference set, thread count, random seed, log level, ...).

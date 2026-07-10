@@ -4,7 +4,13 @@
       "Bash(/home/gnoceras/ScanningTable/.venv/bin/python -c ' *)",
       "Bash(timeout 60 /home/gnoceras/ScanningTable/.venv/bin/python -c ' *)",
       "Bash(git checkout *)",
-      "Bash(git -C /home/gnoceras/ScanningTable status --short)"
+      "Bash(git -C /home/gnoceras/ScanningTable status --short)",
+      "Bash(python3 -c ' *)",
+      "Bash(/home/gnoceras/ScanningTable/.venv/bin/python)",
+      "Bash(/home/gnoceras/ScanningTable/.venv/bin/python -m py_compile reconstruct.py)",
+      "Bash(/home/gnoceras/ScanningTable/.venv/bin/python reconstruct.py --help)",
+      "Bash(git -C /home/gnoceras/ScanningTable diff .claude/settings.json)",
+      "Bash(git -C /home/gnoceras/ScanningTable diff utils/texturing.py)"
     ]
   }
 }
