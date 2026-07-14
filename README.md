@@ -47,6 +47,8 @@ The script to run the ESP8266 is available at [ESP8266.ino](ESP8266\ESP8266.ino)
 
 The [app](scanning_table_app) was made in *Flutter* and **tested on an Android device only**. It has a initial page, only allowing to move to the next page (taking pictures) when the cellphone is connected to the ESP. To start scanning the user first must to choose the folder where the images are going to be saved. After that, the user can click on `Scan` and the app + ESP does the rest automatically. If something goes wrong, the user can click on `stop`, and the operation will be stopped.
 
+Each photo is saved as `<scan>_stop_<stop>_<timestamp>.jpg`, e.g. `01_stop_03_20260703_163620.jpg` - `<scan>` numbers each full rotation sequence within the current app session (`01` for the first press of `Scan`, `02` for the second, and so on) and resets back to `01` every time the app is (re)started, so photos from different scans in the same folder never collide or get mixed up.
+
 The camera settings in the app are following the paper description:
 - Apperture of f/1.2;
 - Shutter speed of 1/4s;
@@ -56,7 +58,9 @@ The camera settings in the app are following the paper description:
 
 # Step 3 - Taking Images
 
-The camera was positioned a little bit different than described in the paper. Instead of at 40 degrees to the table and at 25cm distant, as describred, the images were took framing the whole calibration pattern, at less than 40 degrees. The reason for this is that phones have different focals, meaning that the images from different phones will become different, even if you keep the same parameters. *When doing this on your phone, try to make the board occupy the maximum of the image as possible and at low angles*.
+The camera was positioned a little bit different than described in the paper. Instead of at 40 degrees to the table and at 25cm distant, as describred, the images were took framing the whole calibration pattern, at less than 40 degrees. The reason for this is that phones have different focals, meaning that the images from different phones will become different, even if you keep the same parameters. *When doing this on your phone, try to make the board occupy the maximum of the image as possible and at low angles*. See an example of the virtual image, where you must try to mimic its position in the real picture:
+
+<center><img src="media/virtual_00.png" width="300" height="300"></center>
 
 Just like in the paper, I took some sets of different angles of the object (a 32mm scale minitature painted by me). The sets are in the folder [images](images/). Some examples:
 

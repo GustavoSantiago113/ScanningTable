@@ -10,7 +10,15 @@
       "Bash(/home/gnoceras/ScanningTable/.venv/bin/python -m py_compile reconstruct.py)",
       "Bash(/home/gnoceras/ScanningTable/.venv/bin/python reconstruct.py --help)",
       "Bash(git -C /home/gnoceras/ScanningTable diff .claude/settings.json)",
-      "Bash(git -C /home/gnoceras/ScanningTable diff utils/texturing.py)"
+      "Bash(git -C /home/gnoceras/ScanningTable diff utils/texturing.py)",
+      "Bash(/home/gnoceras/ScanningTable/.venv/bin/python -m py_compile resume_from_dense.py)",
+      "Bash(/home/gnoceras/ScanningTable/.venv/bin/python -m py_compile reconstruct.py resume_from_dense.py)",
+      "Bash(flutter --version)",
+      "Bash(dart --version)",
+      "Bash(/mnt/c/Users/gnoceras/flutter/bin/dart --version)",
+      "Bash(/mnt/c/Users/gnoceras/flutter/bin/dart analyze *)",
+      "Read(//mnt/c/Users/gnoceras/flutter/bin/**)",
+      "Bash(find / -maxdepth 6 -iname \"dart-sdk\" -not -path \"/mnt/*\")"
     ]
   }
 }

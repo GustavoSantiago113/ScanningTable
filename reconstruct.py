@@ -38,7 +38,9 @@ Differences from the notebooks, by design:
   default of 2000px).
 - **Every intermediate file is deleted once texturing finishes successfully**, leaving only
   `outputs/mesh/mesh.ply` and `outputs/textured/textured.ply` (`--keep-intermediates` to skip
-  this and inspect everything a run produced).
+  this and inspect everything a run produced - which, since the point clouds normally never
+  touch disk at all, also makes `--keep-intermediates` write each set's cropped cloud and the
+  merged cloud out as `.ply` files that otherwise wouldn't exist anywhere).
 - **One set failing doesn't abort the run.** Camera geometry, dense reconstruction, and cropping
   run per set inside a `try`/`except`; a set that raises is logged and skipped, and the run
   continues with whatever sets remain (registration/meshing/texturing need at least one).
@@ -583,6 +585,28 @@ def run_texturing(
     return textured_path
 
 
+# --- Optional intermediate point-cloud persistence (--keep-intermediates only) -------------
+
+
+def write_cropped_ply(cfg: Config, set_name: str, points: np.ndarray, colors: np.ndarray) -> Path:
+    """`outputs/<set>/cropped/cropped.ply` - only written when `--keep-intermediates` asks for
+    every intermediate file to be kept; the pipeline itself passes `points`/`colors` on to
+    registration in memory and never needs this file.
+    """
+    path = cfg.output_dir / set_name / "cropped" / "cropped.ply"
+    cr.write_ply(path, points, colors)
+    return path
+
+
+def write_merged_ply(cfg: Config, points: np.ndarray, colors: np.ndarray) -> Path:
+    """`outputs/merged/merged.ply` - same caveat as `write_cropped_ply`: only written for
+    `--keep-intermediates`, not needed by meshing itself (which takes the arrays directly).
+    """
+    path = cfg.output_dir / "merged" / "merged.ply"
+    reg.write_ply(path, points, colors)
+    return path
+
+
 # --- Cleanup ---------------------------------------------------------------------------------
 
 
@@ -641,7 +665,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                               "camera_geometry_estimation.ipynb's own notes on this)")
     parser.add_argument("--random-seed", type=int, default=0)
     parser.add_argument("--keep-intermediates", action="store_true",
-                         help="skip the final cleanup step and leave every intermediate file in place")
+                         help="skip the final cleanup step and leave every intermediate file in place - also "
+                              "writes each set's cropped point cloud (outputs/<set>/cropped/cropped.ply) and "
+                              "the merged point cloud (outputs/merged/merged.ply), which the pipeline itself "
+                              "otherwise never puts on disk")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser.parse_args(argv)
 
@@ -692,6 +719,9 @@ def main(argv: list[str] | None = None) -> int:
 
             log.info("=== %s: cropping ===", set_name)
             cropped_points, cropped_colors, z_lower, z_upper = stage_cropping(set_name, cfg, points, colors)
+            if args.keep_intermediates:
+                cropped_ply_path = write_cropped_ply(cfg, set_name, cropped_points, cropped_colors)
+                log.info("%s: wrote %s (--keep-intermediates)", set_name, cropped_ply_path)
         except Exception:
             log.exception("%s: failed - skipping this set", set_name)
             continue
@@ -712,6 +742,9 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("=== point cloud registration ===")
     merged_points, merged_colors, merged_confidence, transforms = run_registration(cropped, cfg)
+    if args.keep_intermediates:
+        merged_ply_path = write_merged_ply(cfg, merged_points, merged_colors)
+        log.info("wrote %s (--keep-intermediates)", merged_ply_path)
 
     log.info("=== meshing ===")
     tri_mesh, mesh_path = run_meshing(merged_points, merged_colors, merged_confidence, cfg)

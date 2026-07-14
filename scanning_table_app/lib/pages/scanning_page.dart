@@ -37,6 +37,12 @@ class _ScanningPageState extends State<ScanningPage> {
   int _lastProcessedStop = 0;
   Timer? _pollTimer;
 
+  // Which scan (full rotation sequence) this is within the current app session - 1 for the
+  // first "Scan" press after launch, 2 for the second, etc. Reset to 0 with the rest of this
+  // State's fields whenever the app (re)starts, so scan numbering restarts every session
+  // instead of persisting across launches.
+  int _scanNumber = 0;
+
   @override
   void initState() {
     super.initState();
@@ -151,6 +157,7 @@ class _ScanningPageState extends State<ScanningPage> {
     if (mounted) setState(() => _capturing = true);
     try {
       final name =
+          '${_scanNumber.toString().padLeft(2, '0')}_'
           'stop_${stopIndex.toString().padLeft(2, '0')}_${_ts(DateTime.now())}.jpg';
       final XFile shot = await _camera!.takePicture();
       final bytes = await File(shot.path).readAsBytes();
@@ -207,6 +214,7 @@ class _ScanningPageState extends State<ScanningPage> {
           .post(_uri('/start', {'turns': '1'}))
           .timeout(const Duration(seconds: 5));
       if (resp.statusCode == 200) {
+        if (mounted) setState(() => _scanNumber++);
         _startPolling();
       } else {
         if (mounted) setState(() => _sequenceStarted = false);

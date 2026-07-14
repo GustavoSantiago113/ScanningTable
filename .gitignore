@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 
+outputs/
 outputs_test/
 outputs/*/work/
 outputs/*/*.db
