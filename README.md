@@ -20,7 +20,7 @@
 - [Step 7 - Point Cloud Registration](#step-7---point-cloud-registration)
 - [Step 8 - Meshing](#step-8---meshing)
 - [Step 9 - Texturing](#step-9---texturing)
-  - [Running the whole pipeline in one go](#running-the-whole-pipeline-in-one-go)
+- [Running the whole pipeline in one go](#running-the-whole-pipeline-in-one-go)
 
 
 ---
@@ -36,10 +36,11 @@ For the hardware, I used a 28BYJ-48 Stepper Motor with a ULN2003AN DIP-16 Driver
 <img src="media/IMG_20260521_174254.jpg" width="300" height="300">
 
 
-For the lights, I followed the same method as described by the paper, with a desk lamp at 20 cm perpendicullarly appart from the rotating plate.
+For the lights, I followed the same method as described by the paper, with a desk lamp at 20 cm perpendicullarly appart from the rotating plate. Also, it was not described in the paper, but I noticed during tests: **use a cold, white LED**; using warm LEDs leads to weak matching, discarding many real images. It sounds weird, but it happens.
 
 <img src="media/IMG_20260521_174245.jpg" width="300" height="300">
 
+To support the phone, I used the tripod design found in ThingIverse: https://www.thingiverse.com/thing:2423960/files . The files are also in the [3DFiles folder](3DFiles)
 
 # Step 2 - Acquisition Software
 
@@ -62,21 +63,19 @@ The camera was positioned a little bit different than described in the paper. In
 
 <center><img src="media/virtual_00.png" width="300" height="300"></center>
 
-Also, it was not described in the paper, but I noticed during tests: **use a cold, white LED**; using warm LEDs leads to weak matching, discarding many real images. It sounds weird, but it happens.
-
 Just like in the paper, I took some sets of different angles of the object (a 32mm scale minitature painted by me). The sets are in the folder [images](images/). Some examples:
 
 **<center>Set 1:**
 
-<img src="images\set_1\stop_03_20260703_163620.jpg" width="300" height="300"></center>
+<img src="media\set1.jpg" width="300" height="300"></center>
 
 **<center>Set 2:**
 
-<img src="images\set_2\stop_03_20260703_163907.jpg" width="300" height="300"></center>
+<img src="media\set2.jpg" width="300" height="300"></center>
 
 **<center>Set 3:**
 
-<img src="images\set_3\stop_07_20260703_164243.jpg" width="300" height="300"></center>
+<img src="media\set3.jpg" width="300" height="300"></center>
 
 # Step 4 - Camera Geometry Estimation
 
