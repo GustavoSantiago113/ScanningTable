@@ -95,7 +95,7 @@ class Config:
 
     # Real photographs: downscaled for tractable SIFT/dense-stereo runtime. None = native
     # resolution.
-    max_long_edge: int | None = 2000
+    max_long_edge: int | None = 3000
 
     # Virtual calibration sequence.
     n_virtual_views: int = 24
@@ -655,9 +655,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          help="restrict the run to these set names instead of auto-discovering every folder under --images-dir")
     parser.add_argument("--reference-set", default=None,
                          help="set used as the registration reference frame (default: the first discovered set)")
-    parser.add_argument("--max-long-edge", type=int, default=2000,
+    parser.add_argument("--max-long-edge", type=int, default=3000,
                          help="downscale real photographs so their long edge is at most this many pixels "
-                              "before SIFT/dense stereo (default: 2000)")
+                              "before SIFT/dense stereo (default: 3000)")
     parser.add_argument("--no-downscale", action="store_true",
                          help="process real photographs at native resolution - overrides --max-long-edge")
     parser.add_argument("--num-threads", type=int, default=1,

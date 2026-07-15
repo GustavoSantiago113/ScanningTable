@@ -62,6 +62,8 @@ The camera was positioned a little bit different than described in the paper. In
 
 <center><img src="media/virtual_00.png" width="300" height="300"></center>
 
+Also, it was not described in the paper, but I noticed during tests: **use a cold, white LED**; using warm LEDs leads to weak matching, discarding many real images. It sounds weird, but it happens.
+
 Just like in the paper, I took some sets of different angles of the object (a 32mm scale minitature painted by me). The sets are in the folder [images](images/). Some examples:
 
 **<center>Set 1:**
@@ -295,7 +297,7 @@ rather than oversight:
   to the next, rather than round-tripping through the PLY/JSON files separate notebooks need.
   Only what COLMAP's own file-based API requires (its database, plus several reconstruction/
   dense-workspace directories) still lands on disk mid-run.
-- **Downscaling is optional.** `--max-long-edge` changes the notebooks' default of 2000px;
+- **Downscaling is optional.** `--max-long-edge` changes the notebooks' default of 3000px;
   `--no-downscale` processes the original photographs at full resolution.
 - **Everything intermediate is deleted once texturing finishes**, leaving only
   `outputs/mesh/mesh.ply` and `outputs/textured/textured.ply` - pass `--keep-intermediates` to
