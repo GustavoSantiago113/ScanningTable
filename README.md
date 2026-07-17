@@ -36,7 +36,7 @@ For the hardware, I used a 28BYJ-48 Stepper Motor with a ULN2003AN DIP-16 Driver
 <img src="media/IMG_20260521_174254.jpg" width="300" height="300">
 
 
-For the lights, I followed the same method as described by the paper, with a desk lamp at 20 cm perpendicullarly appart from the rotating plate. Also, it was not described in the paper, but I noticed during tests: **use a cold, white LED**; using warm LEDs leads to weak matching, discarding many real images. It sounds weird, but it happens.
+For the lights, I followed the same method as described by the paper, with a desk lamp at 20 cm perpendicullarly appart from the rotating plate **using a cold, white LED**.
 
 <img src="media/IMG_20260521_174245.jpg" width="300" height="300">
 
@@ -79,8 +79,7 @@ Just like in the paper, I took some sets of different angles of the object (a 32
 
 # Step 4 - Camera Geometry Estimation
 
-Implemented in [camera_geometry_estimation.ipynb](camera_geometry_estimation.ipynb), using
-[pycolmap with cuda](https://github.com/colmap/pycolmap) for feature extraction, matching and bundle
+Implemented in [camera_geometry_estimation.ipynb](camera_geometry_estimation.ipynb), using [pycolmap with cuda](https://github.com/colmap/pycolmap) for feature extraction, matching and bundle
 adjustment. The pipeline follows the paper: a sequence of virtual "photographs" of the calibration
 plate is rendered from known viewpoints (paper spec: 12 views, 30&deg; apart, 45&deg; elevation;
 the notebook defaults to 24 views/15&deg; steps for denser real-photo coverage - see its parameters
@@ -93,7 +92,7 @@ sparse point cloud with the artefact's own geometry, not just the calibration pl
 virtual photographs are removed, leaving calibrated real cameras plus a sparse point cloud ready
 for dense reconstruction.
 
-One thing this replica needed that the paper's summary doesn't spell out: **real photos only
+One thing this implementation needed that the paper's summary doesn't spell out: **real photos only
 reliably register when close in azimuth to a virtual view.** Matching a clean, synthetic render
 against a real photograph (different lighting, print quality, JPEG compression, lens blur) is much
 harder than matching two real photos to each other - hence the denser 24-view default above.
@@ -102,8 +101,7 @@ Not every real photograph is guaranteed to register - the notebook reports how m
 intentionally bounded to a fixed runtime (`MAX_RUNTIME_SECONDS`, `MAX_REG_TRIALS=1`) rather than
 retrying indefinitely. Registration also includes plausibility filters (implausible
 camera-to-plate distance, near-duplicate positions from COLMAP's linear solver failing on a
-poorly-conditioned planar-target fit) that discard failed estimates rather than keep them. If you hit not getting real cameras, consider tuning `ABS_POSE_MIN_NUM_INLIERS` /
-`N_VIRTUAL_VIEWS` for the affected set, or re-running with a higher `MAX_REG_TRIALS`.
+poorly-conditioned planar-target fit) that discard failed estimates rather than keep them.
 
 # Step 5 - Dense Point Cloud Reconstruction
 
@@ -146,7 +144,12 @@ the lighter artefact.
 Three things came up validating this against real data (`set_1`-`set_3`) that the paper's setup
 doesn't need to deal with:
 
-- **A Step 4 orientation bug.** This replica's real-camera reconstruction comes out mirrored
+- **Level the turntable tilt**. Not in the paper, added for this implementation: the
+   calibration model fixes the pattern at world Z&nbsp;=&nbsp;0 by construction, but the *real*,
+   physically captured turntable doesn't have to be level in that same frame, and the z-based
+   crop assumes it is. A RANSAC plane fit finds the real pattern/turntable plane and the
+   cloud is rotated so that plane sits back at Z&nbsp;=&nbsp;0.
+- **A Step 4 orientation bug.** This implementation's real-camera reconstruction comes out mirrored
   through the z&nbsp;=&nbsp;0 plane - the artefact reconstructs *below* the turntable instead of
   above it, almost certainly Step 4's own coplanar-target pose ambiguity (see
   `plate_geometry.look_at_origin`'s docstring) resolving to the wrong sign for this rig.
@@ -154,17 +157,27 @@ doesn't need to deal with:
   rest of the crop logic (written straight from the paper, which assumes the artefact sits above
   the turntable) applies correctly. The proper fix belongs in `colmap_calibration.py`'s pose
   disambiguation, not here.
-- **No dark support material.** The images in `images/set_*` have the miniature sitting directly
-  on the calibration pattern - no foam raiser. In practice this doesn't matter: the model's own
-  paint is darker near its base and lightens further up, enough of a luminosity gradient for the
-  paper's sweep to still land on a sensible lower limit.
-- **A z upper-limit isn't in the paper**, but was added here because this replica's dense
+- **No dark support material.** Several captures have the object sitting directly on the
+  calibration pattern - no foam raiser. Usually harmless (the model's own paint is often darker
+  near its base and lightens further up, enough of a luminosity gradient for the paper's sweep
+  to land on a sensible lower limit anyway) - but a real capture with a uniformly saturated-red
+  object broke this outright: Rec.601 luminosity weights red low, so the object's own body read
+  as "dark" almost everywhere, and a single statistically-lucky slab got mistaken for the
+  object's base, cropping nearly the whole thing away. `find_lower_z_limit` now requires the
+  threshold to hold for `MIN_SUSTAINED_SLICES` consecutive slabs, not just the first one that
+  crosses it - see that function's own docstring for the full diagnosis.
+- **A z upper-limit isn't in the paper**, but was added here because this implementation's dense
   reconstruction consistently leaves one small clump of disconnected debris floating well above
   the artefact (likely a specular-highlight fusion ghost) - visible as a gap in point density
   between the artefact's own tapering mass and that clump. `cropping.find_upper_z_limit` cuts at
   the first sufficiently-thick run of near-empty slices above the lower limit. It's a narrow,
-  generic density-gap heuristic, not a general outlier remover - Step 7 (Point Cloud
-  Registration)'s own merge stage still has real pruning work to do on whatever survives cropping.
+  generic density-gap heuristic, not a general outlier remover.
+- **Isolated/floating points**, also not in the paper: dense reconstruction and StereoFusion
+  sometimes leave a handful of sparse, disconnected points behind even after the crop above -
+  true single-/few-point fragments, not a real second surface. `cropping.remove_isolated_points`
+  (the same connected-components approach `meshing.remove_isolated_points` already used on the
+  *merged* cloud) now also runs here, on each set's own cropped cloud, before Step 7 merges
+  multiple sets together and makes tracking down which set a stray point came from harder.
 
 # Step 7 - Point Cloud Registration
 
@@ -189,7 +202,7 @@ partial views, each in its own independent frame, that need combining:
    standard PCA-over-local-neighbours normal, oriented outward from the cloud's own centroid.
 4. **Merge** (Equation 4): once registered, close point pairs across clouds are confidence-
    weighted-interpolated into one rather than kept as two redundant, possibly conflicting points;
-   unique points are kept as-is. This also does this replica's pruning - there's no separate
+   unique points are kept as-is. This also does this implementation's pruning - there's no separate
    pruning stage.
 
 # Step 8 - Meshing
@@ -209,7 +222,7 @@ One things came up building this against real data:
 - **Poisson reconstructs a phantom "bubble" surface.** Poisson fits one *global* implicit
   function across the whole point-cloud, so even a handful of points far from everything else -
   each still gets a plausible local normal - can pull that function's zero-level-set out into a
-  sizeable, completely disconnected surface floating in empty space. Diagnosed on this replica's
+  sizeable, completely disconnected surface floating in empty space. Diagnosed on this implementation's
   own merged cloud: 67,805 of 67,820 points form one connected component at a 1.5mm radius, and
   the rest are 1-4-point fragments (registration/fusion debris, not real geometry) scattered
   elsewhere. `meshing.remove_isolated_points` removes those from the *point-cloud*, before Poisson
@@ -217,12 +230,31 @@ One things came up building this against real data:
   afterwards - which needs the (expensive) reconstruction to have already run once just to find
   out.
 
+- **Thin, sparsely-sampled structures balloon into a "blob" instead of meshing thin.** This is a
+  different failure from the bubble above - it happens even on a clean point-cloud with no
+  disconnected debris. Poisson's single global implicit function has to produce *something*
+  wherever point density drops, and where it drops enough (a narrow base, a thin protrusion),
+  the reconstructed surface doesn't taper down with it - it extrapolates past the last real point
+  and rounds out into a smooth bulge with nothing behind it. Diagnosed on a real scan with a
+  sparsely-sampled base: the raw mesh's z-range extended ~16mm past the point-cloud's own lowest
+  point, and every one of those extrapolated vertices fell in the bottom ~3.5% of Poisson's own
+  per-vertex density estimate (already computed by `open3d`, previously discarded). Low density
+  isn't the same as thin-but-real, though - it flags *unsupported extrapolation* specifically:
+  `meshing.trim_low_density_vertices` drops the lowest `quantile` of vertices by that density
+  (default `quantile=0.02`), which removed the blob almost entirely on that scan while a
+  genuinely thin region elsewhere in the same mesh - lower density than the object's bulk, but
+  still backed by real points - kept over 98% of its vertices. Cutting vertices out of the mesh's
+  middle leaves small disconnected shell fragments along the cut; `meshing.remove_small_mesh_components`
+  clears those by keeping only connected triangle components of at least `min_triangles` (default
+  `100`) - on that same scan, 1,522 components dropped to ~130, and the ones removed made up
+  under 1% of the mesh's total triangles.
+
 # Step 9 - Texturing
 
 Implemented in [texturing.ipynb](texturing.ipynb) via `utils/texturing.py`, following the
 paper's Section 2.4.6: project the original photographs onto Step 8's mesh using the camera
 positions from Step 4's calibration. Each registered real camera is carried through this
-replica's own Step 4 &rarr; Step 8 chain into the mesh's common frame - this replica's version
+implementation's own Step 4 &rarr; Step 8 chain into the mesh's common frame - this implementation's version
 of the paper's "VmnMn" (camera Vmn transformed by the per-acquisition model-matrix Mn):
 
 - **The z-axis correction has no valid rigid-body camera analogue.** Step 6 corrects the
@@ -232,7 +264,7 @@ of the paper's "VmnMn" (camera Vmn transformed by the per-acquisition model-matr
   correctly-reprojecting) substitute instead: composing the original camera rotation with the
   z-flip *on the right* reprojects corrected-frame points onto exactly the same pixels the
   original, unmirrored camera always did, even though the resulting matrix has det = -1. This
-  was validated against this replica's own real cameras, not just derived on paper: repositioned
+  was validated against this implementation's own real cameras, not just derived on paper: repositioned
   into the mesh's common frame, all 100 registered real cameras across the three sets look at
   the mesh's own centroid to within about 6-10&deg; (the notebook's own sanity-check step) -
   before landing on this formula, they were off by ~173&deg;, i.e. facing almost exactly
@@ -243,7 +275,7 @@ of the paper's "VmnMn" (camera Vmn transformed by the per-acquisition model-matr
 The paper's own tool for this step is MeshLab (via UV-atlas texturing from registered
 cameras). `pymeshlab`'s equivalent filter turned out to be broken under headless/server
 execution in this environment (a long-standing, version-spanning upstream issue, not specific
-to this setup), so this replica instead uses `open3d` (already a project dependency,
+to this setup), so this implementation instead uses `open3d` (already a project dependency,
 `meshing.py`) to project every registered, undistorted photo directly onto the mesh and paint
 each *vertex* with the occlusion-aware, multi-view-blended result - not a UV-mapped texture
 atlas, but real photographic colour, correctly occlusion-tested per camera via `open3d`'s own
@@ -258,7 +290,7 @@ this was trustworthy, not just plausible-looking - both documented in
   entirely (the ray origin is never near the mesh surface) and doubles as a proper z-buffer-style
   visibility test.
 - **Occlusion tolerance.** Initially rejected a vertex whenever the ray hit anything before
-  reaching it, which - audited directly against this replica's own mesh - was rejecting even
+  reaching it, which - audited directly against this implementation's own mesh - was rejecting even
   vertices whose normals point almost exactly at the camera. Tracing a few of those hits showed
   real geometry several mm to multiple cm away, not numerical noise: this is a small,
   geometrically complex hand-painted miniature (limbs, weapon, folds), photographed at one fixed
@@ -298,9 +330,14 @@ rather than oversight:
   dense-workspace directories) still lands on disk mid-run.
 - **Downscaling is optional.** `--max-long-edge` changes the notebooks' default of 3000px;
   `--no-downscale` processes the original photographs at full resolution.
-- **Everything intermediate is deleted once texturing finishes**, leaving only
-  `outputs/mesh/mesh.ply` and `outputs/textured/textured.ply` - pass `--keep-intermediates` to
-  leave a run's working files in place instead (e.g. for debugging a failed/flagged set).
+- **Cleanup always runs once texturing finishes**, by default leaving only
+  `outputs/mesh/mesh.ply` and `outputs/textured/textured.ply`. `--keep-intermediates` widens
+  what survives to one plain `.ply` per major stage instead - `<set>/sparse.ply` (Step 4),
+  `<set>/dense.ply` (Step 5), `<set>/cropped/cropped.ply` (Step 6), `merged/merged.ply` (Step
+  7) - written specifically for the flag, since the pipeline itself never puts these on disk
+  otherwise. COLMAP's own databases and dense workspaces are cleaned up either way - the flag is
+  for inspecting the point-cloud pipeline stage by stage, not for keeping every byte a run
+  touched.
 
 **Requires a CUDA GPU** (Step 5, PatchMatchStereo, has no CPU fallback) - the script checks for
 one via `nvidia-smi` at startup and logs a warning rather than failing silently deep into the

@@ -331,7 +331,8 @@ def _mean_reprojection_error(recon: pycolmap.Reconstruction, img: pycolmap.Image
 def filter_degenerate_real_cameras(
     recon: pycolmap.Reconstruction,
     virtual_rel_names: set[str],
-    min_separation_mm: float = 20.0,
+    min_separation_mm: float | None = None,
+    min_separation_fraction: float = 0.25,
 ) -> list[str]:
     """Some real cameras can converge to near-duplicate poses when bundle adjustment's
     linear solver fails to refine a copied initial guess (visible as "Unable to perform
@@ -345,6 +346,34 @@ def filter_degenerate_real_cameras(
     `min_separation_mm` and keeps only the best-conditioned camera (lowest mean
     reprojection error) in each cluster, deregistering the rest. Mutates `recon` in
     place; returns the names of the images that were deregistered.
+
+    **`min_separation_mm` defaults to an adaptive threshold, not a fixed one - this was a
+    real, fully-diagnosed bug, not just a defensive default.** A fixed value (this
+    function's own previous default was a flat 20mm) implicitly assumes a specific rig
+    working radius: for 36 stops spaced 10 degrees apart, the chord between *consecutive,
+    entirely genuine* poses is `2 * radius * sin(5 deg)`, which passes below any fixed
+    threshold the moment the rig's actual radius drops far enough (about 115mm, for a
+    20mm threshold). Diagnosed on a real, well-lit, well-matched capture (every one of 36
+    real photos had 26-35 verified SIFT inliers against its best virtual view - matching
+    was never the problem) whose actual working radius was ~108mm: this function discarded
+    32 of the 36 as "degenerate", when their positions in fact traced a smooth, correctly-
+    ordered circle exactly matching the physical turntable rotation, and removing them
+    made mean reprojection error *worse*, not better (0.92px on the 4 "kept" vs. 0.80px on
+    all 36) - the signature of throwing away good cameras, not bad ones. The unqualified
+    absolute-mm version of this filter cannot distinguish "genuinely stuck near a copied
+    initial guess" (near 0mm apart) from "correctly estimated, naturally close together on
+    a small-radius rig" (order 10-20mm apart) without knowing the rig's own scale.
+
+    The adaptive default instead computes each real camera's distance to its nearest
+    *other* real camera, takes the **median** of those (a robust stand-in for "the rig's
+    typical inter-stop spacing", insensitive to a few true duplicates or misses, as long
+    as they're under half the cameras), and flags only pairs closer than
+    `min_separation_fraction` of that - i.e. relative to how close cameras normally sit on
+    *this* rig, not an assumed one. Validated on the same real data described above: every
+    fraction from 0.1 to 0.3 kept all 36 cameras with the same 0.80px error, comfortably
+    below any plausible genuine-duplicate distance (nominally at or near 0mm) and
+    comfortably below the ~18mm actual inter-stop spacing on that rig. Pass an explicit
+    `min_separation_mm` to opt back into a fixed threshold instead.
     """
     real_images = [img for img in recon.images.values() if img.has_pose and img.name not in virtual_rel_names]
     if len(real_images) < 2:
@@ -354,6 +383,14 @@ def filter_degenerate_real_cameras(
     errors = {img.image_id: _mean_reprojection_error(recon, img) for img in real_images}
     names = {img.image_id: img.name for img in real_images}
     frame_ids = {img.image_id: img.frame_id for img in real_images}
+
+    if min_separation_mm is None:
+        ids_for_spacing = list(centers)
+        nearest_neighbor_dists = [
+            min(np.linalg.norm(centers[i] - centers[j]) for j in ids_for_spacing if j != i)
+            for i in ids_for_spacing
+        ]
+        min_separation_mm = min_separation_fraction * float(np.median(nearest_neighbor_dists))
 
     parent = {i: i for i in centers}
 

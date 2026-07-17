@@ -105,13 +105,74 @@ def poisson_reconstruct(
     """Screened Poisson surface reconstruction. `depth=14` is the paper's own reported "good
     compromise" octree depth - deep enough to retain fine inscribed detail without intractable
     runtime. Returns (mesh, densities): densities is Poisson's own per-vertex sample-density
-    estimate, kept for diagnostics - this replica leans on `remove_isolated_points` on the input
-    cloud rather than trimming the output mesh by density afterwards.
+    estimate. `remove_isolated_points` on the input cloud (called beforehand) catches disconnected
+    debris; `trim_low_density_vertices`, below, catches a different failure mode Poisson causes
+    even on a clean cloud - see its own docstring.
     """
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
         pcd, depth=depth, scale=scale, linear_fit=linear_fit
     )
     return mesh, np.asarray(densities)
+
+
+def trim_low_density_vertices(
+    mesh: o3d.geometry.TriangleMesh, densities: np.ndarray, quantile: float = 0.02
+) -> o3d.geometry.TriangleMesh:
+    """Drop Poisson's own lowest-confidence vertices (the `quantile` fraction with the lowest
+    `densities`) and clean up what that leaves behind.
+
+    Poisson fits one *global* smooth implicit function over the whole cloud, so wherever the
+    input point density drops (a thin structure sampled by relatively few points), the
+    reconstructed surface doesn't get thin along with it - it extrapolates past the last real
+    point and balloons into a rounded "blob" with no points to support it. Diagnosed on this
+    replica's own merged cloud (`outputs/merged/merged.ply`, 241,860 points, one object with a
+    sparsely-sampled base): the raw mesh's z-range extended ~16mm past the point cloud's own
+    lowest point, and every one of those extrapolated vertices fell in the bottom ~3.5% of
+    Poisson's per-vertex density (3.0-8.0, against a global median of 9.9) - exactly the region
+    the input cloud itself goes sparse (hundreds of points per 2mm z-slab there, against tens of
+    thousands through the rest of the object). Trimming that low-density tail at the default
+    `quantile=0.02` removed the blob almost entirely there, while a genuinely thin-but-real region
+    elsewhere in the same cloud (sparse, but not unsupported) kept over 98% of its vertices - low
+    density flags *unsupported extrapolation*, not thinness by itself, so real thin structure
+    survives even though it sits closer to the threshold than the object's bulk.
+
+    Trimming vertices out of the middle of a mesh leaves small disconnected shell fragments along
+    the cut boundary; `remove_small_mesh_components` (below) should be run afterward to clear
+    those.
+    """
+    to_remove = densities < np.quantile(densities, quantile)
+    trimmed = o3d.geometry.TriangleMesh(mesh)
+    trimmed.remove_vertices_by_mask(to_remove)
+    trimmed.remove_unreferenced_vertices()
+    trimmed.remove_degenerate_triangles()
+    trimmed.remove_duplicated_triangles()
+    trimmed.remove_duplicated_vertices()
+    trimmed.remove_non_manifold_edges()
+    return trimmed
+
+
+def remove_small_mesh_components(
+    mesh: o3d.geometry.TriangleMesh, min_triangles: int = 100
+) -> o3d.geometry.TriangleMesh:
+    """Drop connected triangle components smaller than `min_triangles`.
+
+    `trim_low_density_vertices` cuts through the mesh wherever density dips below its threshold,
+    which can strand small shell fragments along the cut - debris left over from the trim, not
+    real geometry. Diagnosed on this replica's own merged cloud after trimming at the default
+    quantile: 1,522 connected components, but all but ~130 of them under 10 triangles each and
+    together making up under 1% of the mesh's total triangle count - the object itself is the one
+    dominant component. `min_triangles=100` clears essentially all of that debris while keeping
+    99.2%+ of the mesh untouched.
+    """
+    triangle_clusters, cluster_n_triangles, _cluster_area = mesh.cluster_connected_triangles()
+    cluster_n_triangles = np.asarray(cluster_n_triangles)
+    triangle_clusters = np.asarray(triangle_clusters)
+    small_clusters = cluster_n_triangles[triangle_clusters] < min_triangles
+
+    cleaned = o3d.geometry.TriangleMesh(mesh)
+    cleaned.remove_triangles_by_mask(small_clusters)
+    cleaned.remove_unreferenced_vertices()
+    return cleaned
 
 
 def mesh_arrays(mesh: o3d.geometry.TriangleMesh) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:

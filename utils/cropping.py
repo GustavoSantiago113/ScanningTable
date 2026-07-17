@@ -22,6 +22,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
+from scipy.spatial import cKDTree
+from scipy.spatial.transform import Rotation
 
 
 def read_ply(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
@@ -94,6 +98,102 @@ def correct_z_axis_inversion(points: np.ndarray) -> np.ndarray:
     return corrected
 
 
+@dataclass
+class PlaneFit:
+    normal: np.ndarray    # (3,) unit normal, oriented towards +z
+    centroid: np.ndarray  # (3,) centroid of the inlier (pattern/turntable) points
+    inlier_fraction: float
+    tilt_deg: float       # angle between `normal` and world +Z
+
+
+def fit_dominant_plane(
+    points: np.ndarray,
+    distance_threshold_mm: float = 1.0,
+    n_trials: int = 2000,
+    seed: int = 0,
+) -> PlaneFit:
+    """The dominant flat surface in `points` - the calibration pattern/turntable, not the
+    artefact sitting on it - via RANSAC (3-point plane hypotheses, scored by inlier count) with
+    a final SVD refit through the inlier set.
+
+    The calibration model fixes the pattern at world Z = 0 during Step 4's bundle adjustment,
+    so every stage of this module up to now has assumed the *real*, physically captured
+    turntable is level in that same frame too. It doesn't have to be: if the rig itself sits at
+    a slight angle, the real pattern's own triangulated points come out tilted relative to
+    world Z = 0 even though the calibration model itself is perfectly flat by construction - the
+    tilt is a property of the physical capture, not of the calibration. `find_lower_z_limit`'s
+    horizontal-slab luminosity search silently assumes "the turntable is a constant-Z surface",
+    which a tilted rig violates: one side of the object gets cut into (the tilted surface rises
+    above the z-slab search's assumed height sooner) while the other side keeps unwanted
+    turntable/pattern material (the surface hasn't yet fallen below it). Diagnosed on a real
+    capture (`set_2`) whose turntable/pattern plane came out tilted ~14 degrees from world Z:
+    the pattern's own points spanned a 46mm z-range (-18 to +28mm) purely from that tilt, before
+    any correction.
+
+    RANSAC (not a plain PCA/least-squares fit over every point) matters here because the
+    artefact is a substantial *minority* of non-planar points sitting on top of the dominant
+    planar majority (the pattern/turntable) - an unweighted fit would let the artefact's own
+    shape bias the fitted plane. Call this on an x/y-cropped cloud (`crop_xy`'s output, not the
+    unrestricted raw cloud) so background/turntable-rim clutter outside the pattern's own
+    footprint doesn't also compete for "dominant plane". Verified on the same real `set_2`
+    capture: RANSAC's robust fit (89% inlier fraction) and a naive whole-cloud PCA agreed on the
+    tilt to within 0.1 degree there, but RANSAC's inlier fraction is itself a useful sanity
+    check a naive fit can't give you - too low, and something other than one dominant plane is
+    likely going on.
+    """
+    rng = np.random.default_rng(seed)
+    n = len(points)
+    best_count = -1
+    best_mask = np.zeros(n, dtype=bool)
+
+    for _ in range(n_trials):
+        a, b, c = points[rng.choice(n, size=3, replace=False)]
+        normal = np.cross(b - a, c - a)
+        norm = np.linalg.norm(normal)
+        if norm < 1e-9:
+            continue
+        normal = normal / norm
+        offset = -normal.dot(a)
+        mask = np.abs(points @ normal + offset) < distance_threshold_mm
+        count = int(mask.sum())
+        if count > best_count:
+            best_count, best_mask = count, mask
+
+    inliers = points[best_mask]
+    centroid = inliers.mean(axis=0)
+    _, _, vt = np.linalg.svd(inliers - centroid, full_matrices=False)
+    normal = vt[-1]
+    if normal[2] < 0:
+        normal = -normal
+    tilt_deg = float(np.degrees(np.arccos(np.clip(normal[2], -1.0, 1.0))))
+    return PlaneFit(normal=normal, centroid=centroid, inlier_fraction=best_count / n, tilt_deg=tilt_deg)
+
+
+def level_plane(points: np.ndarray, plane: PlaneFit) -> np.ndarray:
+    """Rotate `points` about `plane.centroid` so `plane.normal` becomes world +Z, then shift z
+    so the plane itself sits at z = 0 - i.e. put the real, physically tilted turntable back
+    into the constant-Z-plane assumption the rest of this module's z-slice logic depends on.
+    The plane centroid's own (x, y) is left untouched (only its z moves to 0): tilt is a
+    rotation, not a translation, and the calibration model's own x/y=(0,0) pattern-centring
+    isn't part of what's being corrected here.
+
+    Not undone before writing this set's cropped cloud to disk: Step 7 (registration) already
+    coarse+fine-aligns every set's cropped cloud into one common frame independently of whatever
+    orientation each arrived in, so there's nothing downstream that needs this set's z axis to
+    mean the same thing as any other set's.
+    """
+    target = np.array([0.0, 0.0, 1.0])
+    if np.allclose(plane.normal, target, atol=1e-9):
+        rotation_matrix = np.eye(3)
+    else:
+        rotation, _ = Rotation.align_vectors([target], [plane.normal])
+        rotation_matrix = rotation.as_matrix()
+
+    leveled = (points - plane.centroid) @ rotation_matrix.T + plane.centroid
+    leveled[:, 2] -= plane.centroid[2]
+    return leveled
+
+
 def luminosity(colors: np.ndarray) -> np.ndarray:
     """Rec. 601 luma - the paper's "average luminosity" of a point's RGB colour."""
     return colors[:, 0] * 0.299 + colors[:, 1] * 0.587 + colors[:, 2] * 0.114
@@ -142,14 +242,31 @@ def find_lower_z_limit(
     start_offset_mm: float = 2.0,
     slice_thickness_mm: float = 1.0,
     luminosity_threshold: float = 100.0,
+    min_sustained_slices: int = 3,
 ) -> tuple[float, list[ZSliceStat], bool]:
     """The paper's z lower-limit search: starting `start_offset_mm` above `turntable_z`,
     slide a `slice_thickness_mm` slab upward until its average luminosity exceeds
-    `luminosity_threshold`. Returns (z_limit, profile, threshold_reached).
+    `luminosity_threshold` *and stays above it* for `min_sustained_slices` slices in a row.
+    Returns (z_limit, profile, threshold_reached).
 
-    If no slab up to the cloud's own max z exceeds the threshold (e.g. this capture used no
+    If no slab up to the cloud's own max z sustains the threshold (e.g. this capture used no
     dark support material, so there's nothing dark to cut away), z_limit falls back to the
     starting z and `threshold_reached` is False - that's a correct outcome, not a failure.
+
+    **Requiring the crossing to be sustained, not just the first slab, matters for the same
+    reason `find_upper_z_limit`'s debris cutoff already requires a sustained gap rather than a
+    single empty slice.** Diagnosed on a real capture with no dark support material and a
+    uniformly dark-*by-luminosity* object (a saturated red strawberry, sitting directly on the
+    pattern): Rec. 601 luma weights red low (`0.299*R + 0.587*G + 0.114*B`), so the object's own
+    body measured 47-97 average luminosity across its entire real height (2-34mm) - never
+    exceeding the threshold at all - except for one 103-point slab at z=35mm that happened, by
+    chance, to average just over 100. The un-sustained version of this search took that single
+    lucky slab as "the transition to the object" and cropped away the entire real object below
+    (and most of it above) it, leaving 103 points out of 4.16M. Requiring several consecutive
+    slabs to hold above threshold rejects that kind of single-slab statistical fluke; on that
+    same capture, no such sustained run exists anywhere in the profile, so this correctly falls
+    through to `threshold_reached=False` and crops nothing extra - the right outcome when the
+    object sits directly on the pattern with nothing dark separating them.
     """
     z_start = turntable_z + start_offset_mm
     z_max = float(points[:, 2].max())
@@ -158,9 +275,10 @@ def find_lower_z_limit(
         return z_start, [], False
 
     profile = compute_luminosity_profile(points, colors, slice_thickness_mm, z_min=z_start, z_max=z_max)
-    for stat in profile:
-        if stat.num_points > 0 and stat.mean_luminosity > luminosity_threshold:
-            return stat.z_lo, profile, True
+    bright = [stat.num_points > 0 and stat.mean_luminosity > luminosity_threshold for stat in profile]
+    for i in range(len(profile) - min_sustained_slices + 1):
+        if all(bright[i:i + min_sustained_slices]):
+            return profile[i].z_lo, profile, True
     return z_start, profile, False
 
 
@@ -235,3 +353,44 @@ def crop_to_pattern_and_z(
     full_mask = xy_mask.copy()
     full_mask[xy_mask] = z_mask
     return cropped_points, cropped_colors, full_mask
+
+
+def remove_isolated_points(
+    points: np.ndarray,
+    *arrays: np.ndarray,
+    radius: float = 1.5,
+    min_component_size: int = 10,
+) -> tuple[np.ndarray, ...]:
+    """Connected-components outlier removal: connect points within `radius` of each other, then
+    keep only points belonging to a component of at least `min_component_size` members.
+
+    Dense reconstruction (Step 5) and StereoFusion sometimes leave a handful of floating, sparse
+    points behind even after the x/y/z crop above - true single- or few-point fragments,
+    disconnected from the artefact's own mass, rather than a real second surface. Cheap to catch
+    here, on each set's own cropped cloud, before registration (Step 7) ever merges multiple
+    sets together and makes tracking down which set a stray point came from harder. `meshing.
+    remove_isolated_points` is the same function, reused (not imported - this project's utils
+    modules are each kept self-contained, matching `read_ply`/`write_ply`'s own precedent)
+    because it's needed at both this earlier, per-set stage and, again, on the *merged* cloud in
+    Step 8 - registration's own coarse/fine alignment can introduce its own new isolated debris
+    that no per-set pass could have caught in advance.
+
+    `points` plus any additional same-length arrays (colors, ...) are all filtered with the same
+    mask; returned in the same order.
+    """
+    n = len(points)
+    tree = cKDTree(points)
+    pairs = tree.query_pairs(r=radius, output_type="ndarray")
+
+    if len(pairs) == 0:
+        rows, cols = np.array([], dtype=int), np.array([], dtype=int)
+    else:
+        rows = np.concatenate([pairs[:, 0], pairs[:, 1]])
+        cols = np.concatenate([pairs[:, 1], pairs[:, 0]])
+    graph = coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
+
+    _, labels = connected_components(graph, directed=False)
+    sizes = np.bincount(labels)
+    mask = sizes[labels] >= min_component_size
+
+    return (points[mask],) + tuple(a[mask] for a in arrays)

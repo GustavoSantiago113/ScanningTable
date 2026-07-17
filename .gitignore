@@ -13,3 +13,5 @@ outputs/*/dense/workspace/
 outputs/*/dense/sparse/
 outputs/*/dense/fused/
 outputs/textured/rasters/
+
+mini/*

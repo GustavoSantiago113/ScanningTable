@@ -105,9 +105,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--reference-set", default=None,
                          help="set used as the registration reference frame (default: the first resumable set)")
     parser.add_argument("--keep-intermediates", action="store_true",
-                         help="skip the final cleanup step and leave dense/fused, full_triangulated, work, etc. in "
-                              "place - also writes each set's cropped point cloud and the merged point cloud as "
-                              ".ply files (see reconstruct.py's own --keep-intermediates help)")
+                         help="keep one .ply per major stage instead of just the final mesh/textured output "
+                              "(see reconstruct.py's own --keep-intermediates help) - dense/fused, "
+                              "full_triangulated, work, etc. are still cleaned up either way")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser.parse_args(argv)
 
@@ -129,21 +129,31 @@ def main(argv: list[str] | None = None) -> int:
 
     set_data: dict[str, dict] = {}
     cropped: dict[str, tuple] = {}
+    keep_files: dict[str, Path] = {}
     for set_name in set_names:
         try:
+            log.info("=== %s: loading calibrated cameras from disk ===", set_name)
+            final_recon = load_final_recon(cfg.output_dir, set_name)
+            work_dir = cfg.output_dir / set_name / "work"
+            if args.keep_intermediates:
+                sparse_path = reconstruct.write_sparse_ply(cfg, set_name, final_recon)
+                keep_files[f"{set_name}/sparse"] = sparse_path
+                log.info("%s: wrote %s (--keep-intermediates)", set_name, sparse_path)
+
             log.info("=== %s: loading dense reconstruction from disk ===", set_name)
             points, colors = load_dense_points(cfg.output_dir, set_name)
             log.info("%s: %d fused points loaded", set_name, len(points))
+            if args.keep_intermediates:
+                dense_path = reconstruct.write_dense_ply(cfg, set_name, points, colors)
+                keep_files[f"{set_name}/dense"] = dense_path
+                log.info("%s: wrote %s (--keep-intermediates)", set_name, dense_path)
 
             log.info("=== %s: cropping ===", set_name)
             cropped_points, cropped_colors, z_lower, z_upper = reconstruct.stage_cropping(set_name, cfg, points, colors)
             if args.keep_intermediates:
                 cropped_ply_path = reconstruct.write_cropped_ply(cfg, set_name, cropped_points, cropped_colors)
+                keep_files[f"{set_name}/cropped"] = cropped_ply_path
                 log.info("%s: wrote %s (--keep-intermediates)", set_name, cropped_ply_path)
-
-            log.info("=== %s: loading calibrated cameras from disk ===", set_name)
-            final_recon = load_final_recon(cfg.output_dir, set_name)
-            work_dir = cfg.output_dir / set_name / "work"
         except Exception:
             log.exception("%s: failed to resume - skipping this set", set_name)
             continue
@@ -161,21 +171,21 @@ def main(argv: list[str] | None = None) -> int:
     merged_points, merged_colors, merged_confidence, transforms = reconstruct.run_registration(cropped, cfg)
     if args.keep_intermediates:
         merged_ply_path = reconstruct.write_merged_ply(cfg, merged_points, merged_colors)
+        keep_files["merged"] = merged_ply_path
         log.info("wrote %s (--keep-intermediates)", merged_ply_path)
 
     log.info("=== meshing ===")
     tri_mesh, mesh_path = reconstruct.run_meshing(merged_points, merged_colors, merged_confidence, cfg)
+    keep_files["mesh"] = mesh_path
 
     log.info("=== texturing ===")
     textured_path = reconstruct.run_texturing(tri_mesh, set_data, transforms, cfg)
+    keep_files["textured"] = textured_path
 
-    if args.keep_intermediates:
-        log.info("--keep-intermediates set - leaving all intermediate files in place")
-    else:
-        log.info("=== cleanup ===")
-        reconstruct.cleanup_intermediates(cfg, mesh_path, textured_path)
+    log.info("=== cleanup ===")
+    reconstruct.cleanup_intermediates(cfg, keep_files)
 
-    log.info("done: %s, %s", cfg.output_dir / "mesh" / "mesh.ply", cfg.output_dir / "textured" / "textured.ply")
+    log.info("done: %s, %s", mesh_path, textured_path)
     return 0
 
 

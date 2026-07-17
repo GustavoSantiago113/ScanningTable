@@ -36,11 +36,14 @@ Differences from the notebooks, by design:
   several intermediate reconstruction/dense-workspace directories) still touches disk.
 - **Downscaling is optional** (`--no-downscale`, or `--max-long-edge` to change the notebooks'
   default of 2000px).
-- **Every intermediate file is deleted once texturing finishes successfully**, leaving only
-  `outputs/mesh/mesh.ply` and `outputs/textured/textured.ply` (`--keep-intermediates` to skip
-  this and inspect everything a run produced - which, since the point clouds normally never
-  touch disk at all, also makes `--keep-intermediates` write each set's cropped cloud and the
-  merged cloud out as `.ply` files that otherwise wouldn't exist anywhere).
+- **Cleanup always runs once texturing finishes successfully** - by default it leaves only
+  `outputs/mesh/mesh.ply` and `outputs/textured/textured.ply`. `--keep-intermediates` widens
+  what survives cleanup to one plain `.ply` per major stage instead - `<set>/sparse.ply` (Step
+  4), `<set>/dense.ply` (Step 5), `<set>/cropped/cropped.ply` (Step 6), `merged/merged.ply`
+  (Step 7), plus the same mesh/textured outputs - written specifically for this flag, since the
+  pipeline itself never puts these on disk otherwise. Either way, COLMAP's own databases and
+  dense workspaces are never kept - `--keep-intermediates` is for inspecting the point-cloud
+  pipeline stage by stage, not for keeping every byte a run touched.
 - **One set failing doesn't abort the run.** Camera geometry, dense reconstruction, and cropping
   run per set inside a `try`/`except`; a set that raises is logged and skipped, and the run
   continues with whatever sets remain (registration/meshing/texturing need at least one).
@@ -114,7 +117,12 @@ class Config:
 
     # Post-registration sanity filters.
     max_distance_ratio: float = 3.0
-    min_camera_separation_mm: float = 20.0
+    # None = adaptive (a fraction of the median inter-camera spacing actually observed for this
+    # set, rather than a fixed mm value that implicitly assumes a specific rig radius - see
+    # colmap_calibration.filter_degenerate_real_cameras's own docstring for the real diagnosis
+    # this default replaced: a flat 20mm threshold discarded 32/36 entirely genuine, correctly-
+    # ordered camera poses on a rig whose actual working radius put consecutive stops ~18mm apart).
+    min_camera_separation_mm: float | None = None
     min_registered_fraction_warn: float = 0.5
 
     # Dense reconstruction (PatchMatchStereo / StereoFusion).
@@ -134,9 +142,21 @@ class Config:
     z_start_offset_mm: float = 2.0
     z_slice_thickness_mm: float = 1.0
     luminosity_threshold: float = 100.0
+    # Require the luminosity threshold to hold for this many consecutive slices before accepting
+    # it as the real dark-to-light transition, not a single statistically-lucky slice - see
+    # cropping.find_lower_z_limit's own docstring for the real case this fixed (a saturated-red
+    # object with no dark support material almost got entirely cropped away by a one-slice fluke).
+    min_sustained_slices: int = 3
     gap_thickness_mm: float = 5.0
     min_points_per_slice: int = 5
     min_cropped_points_warn: int = 200
+
+    # Turntable-tilt plane fit (cropping.fit_dominant_plane/level_plane) - corrects for the real,
+    # physically captured rig not being perfectly level, which the z-slice crop above otherwise
+    # silently assumes. See fit_dominant_plane's own docstring for a real case this fixed.
+    plane_fit_distance_threshold_mm: float = 1.0
+    plane_fit_n_trials: int = 2000
+    min_plane_inlier_fraction_warn: float = 0.5
 
     # Registration.
     reference_set: str | None = None  # None = first discovered set (sorted)
@@ -154,13 +174,23 @@ class Config:
     merge_radius_mm: float = 1.0
     min_coarse_score_warn: float = 0.2
 
-    # Meshing.
+    # Isolated/floating-point removal (cropping.remove_isolated_points) - used both per-set
+    # right after cropping (below) and again on the merged cloud during meshing, since
+    # registration can introduce its own new isolated debris a per-set pass can't catch.
     isolation_radius_mm: float = 1.5
     min_component_size: int = 10
+
+    # Meshing.
     poisson_depth: int = 14
     poisson_scale: float = 1.1
     poisson_linear_fit: bool = False
     isolated_fraction_warn: float = 0.10
+    # Density-based trimming of Poisson's own low-confidence vertices (mesh.trim_low_density_vertices)
+    # - removes the "blob" Poisson balloons into wherever the input cloud goes sparse (e.g. thin
+    # structures), and the small disconnected shell fragments (mesh.remove_small_mesh_components)
+    # that trimming leaves behind along the cut. See both functions' docstrings.
+    poisson_density_trim_quantile: float = 0.02
+    mesh_min_component_triangles: int = 100
 
     # Texturing.
     occlusion_eps_mm: float = 1.5
@@ -364,11 +394,31 @@ def stage_dense_reconstruction(
 
 def stage_cropping(set_name: str, cfg: Config, points: np.ndarray, colors: np.ndarray) -> tuple[np.ndarray, np.ndarray, float, float]:
     points = cr.correct_z_axis_inversion(points)
+
+    xy_points_for_plane, _, _ = cr.crop_xy(points, colors, cfg.pattern_size_mm)
+    plane = cr.fit_dominant_plane(
+        xy_points_for_plane, distance_threshold_mm=cfg.plane_fit_distance_threshold_mm,
+        n_trials=cfg.plane_fit_n_trials,
+    )
+    log.info(
+        "%s: turntable tilt %.1f deg from level (%.0f%% of the x/y-cropped cloud is this one plane)",
+        set_name, plane.tilt_deg, 100 * plane.inlier_fraction,
+    )
+    if plane.inlier_fraction < cfg.min_plane_inlier_fraction_warn:
+        log.warning(
+            "%s: only %.0f%% of the x/y-cropped cloud fit one dominant plane - the turntable-tilt "
+            "correction may have locked onto the wrong surface (e.g. a large/flat artefact competing "
+            "with the real turntable) rather than the genuine pattern/turntable plane",
+            set_name, 100 * plane.inlier_fraction,
+        )
+    points = cr.level_plane(points, plane)
+
     xy_points, xy_colors, _ = cr.crop_xy(points, colors, cfg.pattern_size_mm)
 
     z_limit, profile, reached_threshold = cr.find_lower_z_limit(
         xy_points, xy_colors, turntable_z=cfg.turntable_z_mm, start_offset_mm=cfg.z_start_offset_mm,
         slice_thickness_mm=cfg.z_slice_thickness_mm, luminosity_threshold=cfg.luminosity_threshold,
+        min_sustained_slices=cfg.min_sustained_slices,
     )
     if not reached_threshold:
         log.info(
@@ -390,6 +440,14 @@ def stage_cropping(set_name: str, cfg: Config, points: np.ndarray, colors: np.nd
             "%s: only %d points survived cropping - the crop box or z-limits may be wrong for "
             "this set", set_name, len(cropped_points),
         )
+
+    before_isolated = len(cropped_points)
+    cropped_points, cropped_colors = cr.remove_isolated_points(
+        cropped_points, cropped_colors, radius=cfg.isolation_radius_mm, min_component_size=cfg.min_component_size,
+    )
+    removed_isolated = before_isolated - len(cropped_points)
+    if removed_isolated:
+        log.info("%s: removed %d floating/isolated point(s) (%.2f%%)", set_name, removed_isolated, 100 * removed_isolated / before_isolated)
 
     return cropped_points, cropped_colors, z_limit, z_upper_limit
 
@@ -496,7 +554,7 @@ def run_meshing(
     mesh.estimate_normals(pcd, k=cfg.normal_k)
 
     t0 = time.time()
-    tri_mesh, _densities = mesh.poisson_reconstruct(
+    tri_mesh, densities = mesh.poisson_reconstruct(
         pcd, depth=cfg.poisson_depth, scale=cfg.poisson_scale, linear_fit=cfg.poisson_linear_fit
     )
     vertices, faces, _colors = mesh.mesh_arrays(tri_mesh)
@@ -509,6 +567,14 @@ def run_meshing(
             "meshing: mesh has very few faces (%d) - reconstruction may have failed, or the "
             "merged cloud may be too sparse/noisy", len(faces),
         )
+
+    tri_mesh = mesh.trim_low_density_vertices(tri_mesh, densities, quantile=cfg.poisson_density_trim_quantile)
+    tri_mesh = mesh.remove_small_mesh_components(tri_mesh, min_triangles=cfg.mesh_min_component_triangles)
+    trimmed_vertices, trimmed_faces, _colors = mesh.mesh_arrays(tri_mesh)
+    log.info(
+        "meshing: trimmed low-density/disconnected debris -> %d vertices, %d faces (was %d, %d)",
+        len(trimmed_vertices), len(trimmed_faces), len(vertices), len(faces),
+    )
 
     mesh_path = cfg.output_dir / "mesh" / "mesh.ply"
     mesh.write_mesh(mesh_path, tri_mesh)
@@ -586,22 +652,37 @@ def run_texturing(
 
 
 # --- Optional intermediate point-cloud persistence (--keep-intermediates only) -------------
+#
+# None of these are needed by the pipeline itself - every stage below passes its output to the
+# next in memory. They exist purely so `--keep-intermediates` has plain, inspectable .ply files
+# to keep instead of COLMAP's own (much larger, much less portable) database/workspace
+# directories - see `cleanup_intermediates`.
+
+
+def write_sparse_ply(cfg: Config, set_name: str, recon: pycolmap.Reconstruction) -> Path:
+    """`outputs/<set>/sparse.ply` - Step 4's calibrated real-camera sparse point cloud."""
+    path = cfg.output_dir / set_name / "sparse.ply"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    recon.export_PLY(str(path))
+    return path
+
+
+def write_dense_ply(cfg: Config, set_name: str, points: np.ndarray, colors: np.ndarray) -> Path:
+    """`outputs/<set>/dense.ply` - Step 5's raw, unfiltered dense fused point cloud."""
+    path = cfg.output_dir / set_name / "dense.ply"
+    dr.write_ply(path, points, colors)
+    return path
 
 
 def write_cropped_ply(cfg: Config, set_name: str, points: np.ndarray, colors: np.ndarray) -> Path:
-    """`outputs/<set>/cropped/cropped.ply` - only written when `--keep-intermediates` asks for
-    every intermediate file to be kept; the pipeline itself passes `points`/`colors` on to
-    registration in memory and never needs this file.
-    """
+    """`outputs/<set>/cropped/cropped.ply` - Step 6's cropped, isolated-point-cleaned cloud."""
     path = cfg.output_dir / set_name / "cropped" / "cropped.ply"
     cr.write_ply(path, points, colors)
     return path
 
 
 def write_merged_ply(cfg: Config, points: np.ndarray, colors: np.ndarray) -> Path:
-    """`outputs/merged/merged.ply` - same caveat as `write_cropped_ply`: only written for
-    `--keep-intermediates`, not needed by meshing itself (which takes the arrays directly).
-    """
+    """`outputs/merged/merged.ply` - Step 7's registered, merged cloud."""
     path = cfg.output_dir / "merged" / "merged.ply"
     reg.write_ply(path, points, colors)
     return path
@@ -610,28 +691,33 @@ def write_merged_ply(cfg: Config, points: np.ndarray, colors: np.ndarray) -> Pat
 # --- Cleanup ---------------------------------------------------------------------------------
 
 
-def cleanup_intermediates(cfg: Config, mesh_path: Path, textured_path: Path) -> None:
-    """Delete everything under `cfg.output_dir` except the final mesh and textured mesh."""
-    if not mesh_path.exists() or mesh_path.stat().st_size == 0:
-        raise RuntimeError(f"refusing to clean up: {mesh_path} is missing or empty")
-    if not textured_path.exists() or textured_path.stat().st_size == 0:
-        raise RuntimeError(f"refusing to clean up: {textured_path} is missing or empty")
+def cleanup_intermediates(cfg: Config, keep_files: dict[str, Path]) -> None:
+    """Delete everything under `cfg.output_dir` except `keep_files` (label -> path), each
+    preserved at the same path, relative to `cfg.output_dir`, it already lives at.
+    """
+    for label, path in keep_files.items():
+        if not path.exists() or path.stat().st_size == 0:
+            raise RuntimeError(f"refusing to clean up: {label} ({path}) is missing or empty")
 
     with tempfile.TemporaryDirectory() as tmp:
-        tmp_mesh = Path(tmp) / "mesh.ply"
-        tmp_textured = Path(tmp) / "textured.ply"
-        shutil.copy2(mesh_path, tmp_mesh)
-        shutil.copy2(textured_path, tmp_textured)
+        staged = []
+        for path in keep_files.values():
+            rel = path.relative_to(cfg.output_dir)
+            tmp_path = Path(tmp) / rel
+            tmp_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, tmp_path)
+            staged.append((tmp_path, rel))
 
         shutil.rmtree(cfg.output_dir)
-        (cfg.output_dir / "mesh").mkdir(parents=True)
-        (cfg.output_dir / "textured").mkdir(parents=True)
-        shutil.move(str(tmp_mesh), str(cfg.output_dir / "mesh" / "mesh.ply"))
-        shutil.move(str(tmp_textured), str(cfg.output_dir / "textured" / "textured.ply"))
+        cfg.output_dir.mkdir(parents=True)
+        for tmp_path, rel in staged:
+            dst = cfg.output_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(tmp_path), str(dst))
 
     log.info(
-        "cleaned up intermediates - kept %s and %s",
-        cfg.output_dir / "mesh" / "mesh.ply", cfg.output_dir / "textured" / "textured.ply",
+        "cleaned up intermediates - kept: %s",
+        ", ".join(str(cfg.output_dir / rel) for _, rel in sorted(staged, key=lambda x: str(x[1]))),
     )
 
 
@@ -665,10 +751,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                               "camera_geometry_estimation.ipynb's own notes on this)")
     parser.add_argument("--random-seed", type=int, default=0)
     parser.add_argument("--keep-intermediates", action="store_true",
-                         help="skip the final cleanup step and leave every intermediate file in place - also "
-                              "writes each set's cropped point cloud (outputs/<set>/cropped/cropped.ply) and "
-                              "the merged point cloud (outputs/merged/merged.ply), which the pipeline itself "
-                              "otherwise never puts on disk")
+                         help="keep one .ply per major stage instead of just the final mesh/textured output: "
+                              "outputs/<set>/sparse.ply, outputs/<set>/dense.ply, "
+                              "outputs/<set>/cropped/cropped.ply, and outputs/merged/merged.ply - all written "
+                              "specifically for this flag, since the pipeline itself never puts them on disk. "
+                              "COLMAP's own databases/workspaces are still cleaned up either way")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser.parse_args(argv)
 
@@ -709,18 +796,28 @@ def main(argv: list[str] | None = None) -> int:
 
     set_data: dict[str, dict] = {}
     cropped: dict[str, tuple[np.ndarray, np.ndarray, float, float]] = {}
+    keep_files: dict[str, Path] = {}
     for set_name in set_names:
         try:
             log.info("=== %s: camera geometry estimation ===", set_name)
             geom = stage_camera_geometry(set_name, cfg)
+            if args.keep_intermediates:
+                sparse_path = write_sparse_ply(cfg, set_name, geom["final_recon"])
+                keep_files[f"{set_name}/sparse"] = sparse_path
+                log.info("%s: wrote %s (--keep-intermediates)", set_name, sparse_path)
 
             log.info("=== %s: dense reconstruction ===", set_name)
             points, colors = stage_dense_reconstruction(set_name, cfg, geom["final_recon"], geom["work_dir"])
+            if args.keep_intermediates:
+                dense_path = write_dense_ply(cfg, set_name, points, colors)
+                keep_files[f"{set_name}/dense"] = dense_path
+                log.info("%s: wrote %s (--keep-intermediates)", set_name, dense_path)
 
             log.info("=== %s: cropping ===", set_name)
             cropped_points, cropped_colors, z_lower, z_upper = stage_cropping(set_name, cfg, points, colors)
             if args.keep_intermediates:
                 cropped_ply_path = write_cropped_ply(cfg, set_name, cropped_points, cropped_colors)
+                keep_files[f"{set_name}/cropped"] = cropped_ply_path
                 log.info("%s: wrote %s (--keep-intermediates)", set_name, cropped_ply_path)
         except Exception:
             log.exception("%s: failed - skipping this set", set_name)
@@ -744,21 +841,21 @@ def main(argv: list[str] | None = None) -> int:
     merged_points, merged_colors, merged_confidence, transforms = run_registration(cropped, cfg)
     if args.keep_intermediates:
         merged_ply_path = write_merged_ply(cfg, merged_points, merged_colors)
+        keep_files["merged"] = merged_ply_path
         log.info("wrote %s (--keep-intermediates)", merged_ply_path)
 
     log.info("=== meshing ===")
     tri_mesh, mesh_path = run_meshing(merged_points, merged_colors, merged_confidence, cfg)
+    keep_files["mesh"] = mesh_path
 
     log.info("=== texturing ===")
     textured_path = run_texturing(tri_mesh, set_data, transforms, cfg)
+    keep_files["textured"] = textured_path
 
-    if args.keep_intermediates:
-        log.info("--keep-intermediates set - leaving all intermediate files in place")
-    else:
-        log.info("=== cleanup ===")
-        cleanup_intermediates(cfg, mesh_path, textured_path)
+    log.info("=== cleanup ===")
+    cleanup_intermediates(cfg, keep_files)
 
-    log.info("done: %s, %s", cfg.output_dir / "mesh" / "mesh.ply", cfg.output_dir / "textured" / "textured.ply")
+    log.info("done: %s, %s", mesh_path, textured_path)
     return 0
 
 
