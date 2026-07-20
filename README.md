@@ -92,11 +92,6 @@ sparse point cloud with the artefact's own geometry, not just the calibration pl
 virtual photographs are removed, leaving calibrated real cameras plus a sparse point cloud ready
 for dense reconstruction.
 
-One thing this implementation needed that the paper's summary doesn't spell out: **real photos only
-reliably register when close in azimuth to a virtual view.** Matching a clean, synthetic render
-against a real photograph (different lighting, print quality, JPEG compression, lens blur) is much
-harder than matching two real photos to each other - hence the denser 24-view default above.
-
 Not every real photograph is guaranteed to register - the notebook reports how many did, and is
 intentionally bounded to a fixed runtime (`MAX_RUNTIME_SECONDS`, `MAX_REG_TRIALS=1`) rather than
 retrying indefinitely. Registration also includes plausibility filters (implausible
@@ -134,14 +129,24 @@ vs. ~35 minutes total for all of `set_1` at 2000x1500). Even though the poits de
 
 # Step 6 - Cropping
 
-Implemented in [cropping.ipynb](cropping.ipynb). The paper's method: an axis-aligned crop box
-with x/y extent equal to the calibration pattern's own size (130&times;130&nbsp;mm, centred at
-the world origin, since the calibration model is defined at z&nbsp;=&nbsp;0), and a z lower-limit
-found by sliding a 1&nbsp;mm slab upward from 2&nbsp;mm above the turntable, averaging point
-luminosity, until it crosses a threshold - the point where dark supporting material gives way to
-the lighter artefact.
+Implemented in [cropping.ipynb](cropping.ipynb). An axis-aligned crop box with x/y extent equal
+to the calibration pattern's own size (130&times;130&nbsp;mm, centred at the world origin, since
+the calibration model is defined at z&nbsp;=&nbsp;0), and a **fixed** z lower-limit of
+2&nbsp;mm above the turntable.
 
-Three things came up validating this against real data (`set_1`-`set_3`) that the paper's setup
+The paper's own method for the lower limit is a *search*, not a fixed offset: slide a 1mm slab
+upward from 2mm above the turntable, averaging point luminosity, until it crosses a threshold -
+below that z is dark supporting material, above it the lighter artefact. That's the right method
+for a setup that actually hides the object on dark foam. This implementation's own captures
+(`set_1`, `set_2`) don't use any, though: measured directly against the real data, the printed
+pattern is one dominant, bright, neutral-grey point mass right at z&nbsp;=&nbsp;0, and the
+artefact's own material begins immediately above it (over a 100x point-count drop between z=0 and
+z=1mm) - there's no separate dark material to search for, so the fixed 2mm offset is used
+directly instead. The luminosity search (`cropping.find_lower_z_limit`) is still implemented and
+correct; it just isn't called by `reconstruct.py`'s pipeline by default any more, because on this
+project's own real data it actively mis-fired - see the next bullet.
+
+Four things came up validating this against real data (`set_1`-`set_3`) that the paper's setup
 doesn't need to deal with:
 
 - **Level the turntable tilt**. Not in the paper, added for this implementation: the
@@ -157,27 +162,12 @@ doesn't need to deal with:
   rest of the crop logic (written straight from the paper, which assumes the artefact sits above
   the turntable) applies correctly. The proper fix belongs in `colmap_calibration.py`'s pose
   disambiguation, not here.
-- **No dark support material.** Several captures have the object sitting directly on the
-  calibration pattern - no foam raiser. Usually harmless (the model's own paint is often darker
-  near its base and lightens further up, enough of a luminosity gradient for the paper's sweep
-  to land on a sensible lower limit anyway) - but a real capture with a uniformly saturated-red
-  object broke this outright: Rec.601 luminosity weights red low, so the object's own body read
-  as "dark" almost everywhere, and a single statistically-lucky slab got mistaken for the
-  object's base, cropping nearly the whole thing away. `find_lower_z_limit` now requires the
-  threshold to hold for `MIN_SUSTAINED_SLICES` consecutive slabs, not just the first one that
-  crosses it - see that function's own docstring for the full diagnosis.
 - **A z upper-limit isn't in the paper**, but was added here because this implementation's dense
   reconstruction consistently leaves one small clump of disconnected debris floating well above
   the artefact (likely a specular-highlight fusion ghost) - visible as a gap in point density
   between the artefact's own tapering mass and that clump. `cropping.find_upper_z_limit` cuts at
   the first sufficiently-thick run of near-empty slices above the lower limit. It's a narrow,
   generic density-gap heuristic, not a general outlier remover.
-- **Isolated/floating points**, also not in the paper: dense reconstruction and StereoFusion
-  sometimes leave a handful of sparse, disconnected points behind even after the crop above -
-  true single-/few-point fragments, not a real second surface. `cropping.remove_isolated_points`
-  (the same connected-components approach `meshing.remove_isolated_points` already used on the
-  *merged* cloud) now also runs here, on each set's own cropped cloud, before Step 7 merges
-  multiple sets together and makes tracking down which set a stray point came from harder.
 
 # Step 7 - Point Cloud Registration
 

@@ -1,21 +1,30 @@
-"""Cropping: remove the turntable, calibration pattern, and any support material from the
-dense point cloud produced by Step 5 (dense_reconstruction.ipynb), leaving just the artefact.
+"""Cropping: remove the turntable/calibration pattern and any floating debris from the dense
+point cloud produced by Step 5 (dense_reconstruction.ipynb), leaving just the artefact.
 
-Follows the paper's method directly:
   1. The calibration model is defined at z = 0 during bundle adjustment (Step 4), so an
      axis-aligned x/y box the size of the calibration pattern, centred at the world origin,
      already excludes almost everything that isn't the pattern or the object sitting on it.
-  2. The z lower limit is *not* a fixed number - it's found by starting 2 mm above the
-     turntable (z = 0) and sliding a 1 mm-thick horizontal slab upward, computing each
-     slab's average point luminosity, until that average exceeds a threshold. Below that
-     z, points belong to the dark supporting material (or the turntable itself); above it,
-     points belong to the (much lighter) artefact. The z upper limit is just the cloud's own
-     maximum z - there's nothing above the artefact to cut away.
+  2. The z lower limit is a *fixed* offset (`z_start_offset_mm`, 2mm), not a search: measured
+     directly against this project's own real captures, the printed pattern is one dominant,
+     bright, neutral-grey point mass right at z = 0, with point count collapsing over 100x by
+     z = 1mm as the artefact's own material begins immediately above it.
+  3. The z upper limit looks for a density gap (`find_upper_z_limit`) between the artefact's own
+     tapering mass and any disconnected debris floating further up, and a largest-connected-
+     component keep (`keep_largest_component`) catches whatever that gap search misses.
 
-On captures with no dark support material underneath the object (nothing beneath it needs
-hiding), the very first slab at z = 2 mm already exceeds the threshold, so the z-crop is a
-no-op and only the x/y box does any work - that's an honest reflection of the input, not a
-bug in the search.
+The paper's own method for the lower limit is a *search*, not a fixed offset: starting 2mm above
+the turntable, slide a 1mm slab upward, averaging point luminosity, until it crosses a threshold -
+below that z is dark supporting material (or the turntable), above it the (much lighter) artefact.
+That method is still here (`find_lower_z_limit`, `compute_luminosity_profile`) and is correct for
+a setup that actually uses dark support material to hide underneath the object. It is *not* used
+by this module's own pipeline (`reconstruct.py`'s `stage_cropping`) by default, though, because
+this project's own real captures don't use any: measured directly against `set_1`/`set_2`, the
+artefact sits right on the pattern with nothing dark underneath, and the search actively mis-fired
+on that data - the artefact's own lower/mid body reads dark under Rec.601 luma for tens of
+millimetres before brightening near its top, so the search mistook real artefact material for
+support material and cropped away a large chunk of the object, not debris. See
+`find_lower_z_limit`'s own docstring, and `reconstruct.Config.z_start_offset_mm`'s comment, for
+the full diagnosis with real numbers.
 """
 
 from dataclasses import dataclass
@@ -353,6 +362,57 @@ def crop_to_pattern_and_z(
     full_mask = xy_mask.copy()
     full_mask[xy_mask] = z_mask
     return cropped_points, cropped_colors, full_mask
+
+
+def keep_largest_component(
+    points: np.ndarray,
+    *arrays: np.ndarray,
+    radius: float = 1.5,
+) -> tuple[np.ndarray, ...]:
+    """Connect points within `radius` of each other, then keep only the single largest resulting
+    component - everything else is dropped, no matter how large.
+
+    `find_upper_z_limit`'s density-profile gap search assumes disconnected reconstruction debris
+    sits above the artefact separated by a real *density* gap of `gap_thickness_mm` (default
+    5mm) worth of near-empty z-slabs. Diagnosed on two independent real captures where that
+    assumption failed: both `set_1` and `set_2` cropped clouds each split into two large,
+    similarly-sized connected components (radius=1.5mm) - the artefact itself, and a second,
+    completely disconnected mass sitting a mere ~1-3mm above it in z (set_1: 46.5 to 47.3mm;
+    set_2: a 2mm dead gap at 44-46mm with zero points) - well under the 5mm the gap search
+    requires, so it never fired and the second mass survived cropping in both sets. The two
+    components' own mean colours confirm they're physically different things, not one object
+    with a sparsely-sampled neck: the artefact reads strongly red in both captures (mean RGB
+    ~[225,58,81] and ~[200,72,61]), while the surviving mass above it reads flat grey-brown in
+    both (~[127,107,93] and ~[129,109,94]) - consistent across two unrelated scans, so not
+    random per-capture noise either.
+
+    A single small artefact sitting on a turntable, once the turntable/pattern/dark-support
+    material is already cropped away, should be exactly one connected piece of matter - so unlike
+    `remove_isolated_points` (which only drops components below `min_component_size`, on the
+    assumption that a handful of stray points is debris but any larger group might be real), this
+    keeps *only* the largest component and drops every other one outright, including large ones.
+    That's a stronger assumption and does throw away real geometry if an artefact is ever
+    genuinely split by occlusion into multiple disconnected pieces after cropping - but on both
+    real captures this was diagnosed against, it's exactly what separates the artefact from the
+    ghost mass sitting above it, which `remove_isolated_points`'s size threshold alone let through
+    (7,883 and 12,024 points respectively - nowhere near "a handful of stray points").
+    """
+    n = len(points)
+    tree = cKDTree(points)
+    pairs = tree.query_pairs(r=radius, output_type="ndarray")
+
+    if len(pairs) == 0:
+        rows, cols = np.array([], dtype=int), np.array([], dtype=int)
+    else:
+        rows = np.concatenate([pairs[:, 0], pairs[:, 1]])
+        cols = np.concatenate([pairs[:, 1], pairs[:, 0]])
+    graph = coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
+
+    _, labels = connected_components(graph, directed=False)
+    sizes = np.bincount(labels)
+    mask = labels == np.argmax(sizes)
+
+    return (points[mask],) + tuple(a[mask] for a in arrays)
 
 
 def remove_isolated_points(

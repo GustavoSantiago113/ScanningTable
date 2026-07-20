@@ -136,17 +136,25 @@ class Config:
     density_targets_per_mm2: tuple[float, ...] = (100.0, 300.0)
     min_fused_points_warn: int = 500
 
-    # Cropping.
+    # Cropping. z_start_offset_mm is a *fixed* lower cutoff, not a search: measured directly
+    # against this project's own real captures (both set_1 and set_2), the printed calibration
+    # pattern is exactly ~1mm thick and reads as one dominant, bright, neutral-grey point mass at
+    # z=0 (600k+ points, RGB ~150/153/153), with point count collapsing over 100x by z=1mm as the
+    # artefact's own (much darker) material begins immediately above it - there is no separate
+    # dark support material to search for in this setup (the artefact sits directly on the
+    # pattern). A luminosity-threshold search for where "dark support material" ends (the paper's
+    # own method, for setups that *do* use a dark foam riser) was tried here first, but on this
+    # data it actively mis-fired: the artefact's own lower/mid body reads dark under Rec.601 luma
+    # (well under the 100-threshold) for tens of millimetres before brightening near its top, so
+    # the search mistook the artefact's own material for support material and cropped away
+    # everything from ~2mm up to ~34-43mm - a large chunk of the real object, not debris. See
+    # `cropping.find_lower_z_limit`'s own docstring - the function is still there, correct, and
+    # usable for a setup that genuinely has dark support material; it's just not what this
+    # project's own captures need.
     pattern_size_mm: float = 130.0
     turntable_z_mm: float = 0.0
     z_start_offset_mm: float = 2.0
     z_slice_thickness_mm: float = 1.0
-    luminosity_threshold: float = 100.0
-    # Require the luminosity threshold to hold for this many consecutive slices before accepting
-    # it as the real dark-to-light transition, not a single statistically-lucky slice - see
-    # cropping.find_lower_z_limit's own docstring for the real case this fixed (a saturated-red
-    # object with no dark support material almost got entirely cropped away by a one-slice fluke).
-    min_sustained_slices: int = 3
     gap_thickness_mm: float = 5.0
     min_points_per_slice: int = 5
     min_cropped_points_warn: int = 200
@@ -179,6 +187,11 @@ class Config:
     # registration can introduce its own new isolated debris a per-set pass can't catch.
     isolation_radius_mm: float = 1.5
     min_component_size: int = 10
+    # Largest-connected-component keep (cropping.keep_largest_component), per-set only - a
+    # single artefact should be one connected mass once the turntable/pattern is cropped away;
+    # see that function's own docstring for the real disconnected-"floating blob" case this
+    # catches that remove_isolated_points's size threshold alone lets through.
+    crop_largest_component_fraction_warn: float = 0.3
 
     # Meshing.
     poisson_depth: int = 14
@@ -415,18 +428,13 @@ def stage_cropping(set_name: str, cfg: Config, points: np.ndarray, colors: np.nd
 
     xy_points, xy_colors, _ = cr.crop_xy(points, colors, cfg.pattern_size_mm)
 
-    z_limit, profile, reached_threshold = cr.find_lower_z_limit(
-        xy_points, xy_colors, turntable_z=cfg.turntable_z_mm, start_offset_mm=cfg.z_start_offset_mm,
-        slice_thickness_mm=cfg.z_slice_thickness_mm, luminosity_threshold=cfg.luminosity_threshold,
-        min_sustained_slices=cfg.min_sustained_slices,
+    # Fixed lower cutoff (the pattern's own measured height), not a luminosity search - see the
+    # Config field's own comment for why.
+    z_limit = cfg.turntable_z_mm + cfg.z_start_offset_mm
+    z_max = float(xy_points[:, 2].max()) if len(xy_points) else z_limit
+    profile = cr.compute_luminosity_profile(
+        xy_points, xy_colors, slice_thickness_mm=cfg.z_slice_thickness_mm, z_min=z_limit, z_max=z_max,
     )
-    if not reached_threshold:
-        log.info(
-            "%s: luminosity threshold never reached - no dark support material detected, z lower "
-            "limit fell back to the %.1fmm start offset", set_name, z_limit,
-        )
-
-    z_max = float(xy_points[:, 2].max()) if len(xy_points) else 0.0
     z_upper_limit = cr.find_upper_z_limit(
         profile, fallback_z_max=z_max, gap_thickness_mm=cfg.gap_thickness_mm, min_points_per_slice=cfg.min_points_per_slice,
     )
@@ -441,13 +449,22 @@ def stage_cropping(set_name: str, cfg: Config, points: np.ndarray, colors: np.nd
             "this set", set_name, len(cropped_points),
         )
 
-    before_isolated = len(cropped_points)
-    cropped_points, cropped_colors = cr.remove_isolated_points(
-        cropped_points, cropped_colors, radius=cfg.isolation_radius_mm, min_component_size=cfg.min_component_size,
+    before_largest = len(cropped_points)
+    cropped_points, cropped_colors = cr.keep_largest_component(
+        cropped_points, cropped_colors, radius=cfg.isolation_radius_mm,
     )
-    removed_isolated = before_isolated - len(cropped_points)
-    if removed_isolated:
-        log.info("%s: removed %d floating/isolated point(s) (%.2f%%)", set_name, removed_isolated, 100 * removed_isolated / before_isolated)
+    removed_fraction = (before_largest - len(cropped_points)) / max(before_largest, 1)
+    if removed_fraction > 0:
+        log.info(
+            "%s: kept largest connected component: %d -> %d points (%.1f%% dropped as disconnected)",
+            set_name, before_largest, len(cropped_points), 100 * removed_fraction,
+        )
+    if removed_fraction > cfg.crop_largest_component_fraction_warn:
+        log.warning(
+            "%s: an unusually high fraction of points (%.1f%%) were dropped keeping only the "
+            "largest connected component - double-check the surviving cloud is really the "
+            "artefact and not a fragment of it", set_name, 100 * removed_fraction,
+        )
 
     return cropped_points, cropped_colors, z_limit, z_upper_limit
 
