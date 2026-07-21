@@ -1,22 +1,42 @@
-"""360-degree orbit-view video rendering for a finished, textured mesh (any triangle-mesh PLY
-with per-vertex colours - e.g. Step 9's `textured.ply`, or anything saved under `results/`) - a
-quick way to visually inspect a result without opening a GUI.
+"""360-degree orbit-view video rendering for a finished result PLY - either a textured triangle
+mesh (e.g. Step 9's `textured.ply`) or a plain point cloud (e.g. a `*_PC.ply` export, or any of
+this project's own intermediate point clouds - merged/cropped/dense) - a quick way to visually
+inspect a result without opening a GUI.
 
 Uses open3d's offscreen renderer, which runs headless via EGL (verified working in this project's
 WSL environment - no X server/display needed) rather than the interactive `Visualizer` window
 this project's other notebooks use for on-screen previews.
 
-Orbits the camera in the x/y plane around the mesh's own bounding-box centre at a fixed elevation,
-matching this project's z-up convention (the turntable sits at world z = 0 throughout
+Orbits the camera in the x/y plane around the geometry's own bounding-box centre at a fixed
+elevation, matching this project's z-up convention (the turntable sits at world z = 0 throughout
 `utils/cropping.py`).
 """
 
 import argparse
 from pathlib import Path
+from typing import TypeAlias
 
 import cv2
 import numpy as np
 import open3d as o3d
+
+Geometry: TypeAlias = o3d.geometry.TriangleMesh | o3d.geometry.PointCloud
+
+
+def load_geometry(path: Path) -> Geometry:
+    """Load `path` as a `TriangleMesh` if it has faces, otherwise as a `PointCloud`. A PLY with
+    a `face` element (any of this project's meshed/textured outputs) reads as a mesh; one with
+    only a `vertex` element (a `*_PC.ply` export, or any bare point cloud this project writes -
+    `merged.ply`, `cropped.ply`, `dense.ply`, ...) reads as a point cloud instead.
+    """
+    mesh = o3d.io.read_triangle_mesh(str(path))
+    if len(mesh.triangles) > 0:
+        return mesh
+
+    pcd = o3d.io.read_point_cloud(str(path))
+    if len(pcd.points) == 0:
+        raise ValueError(f"{path} has neither triangles nor points - not a valid mesh or point cloud")
+    return pcd
 
 
 def orbit_camera_positions(
@@ -33,33 +53,44 @@ def orbit_camera_positions(
 
 
 def render_orbit_frames(
-    mesh: o3d.geometry.TriangleMesh,
+    geometry: Geometry,
     num_frames: int = 120,
     width: int = 1280,
     height: int = 720,
     elevation_deg: float = 20.0,
     fov_deg: float = 30.0,
+    point_size: float = 3.0,
 ) -> list[np.ndarray]:
-    """Render `num_frames` frames of `mesh` orbiting a full 360 degrees, as a list of (h, w, 3)
-    uint8 RGB arrays. The camera distance is derived from `fov_deg` and the mesh's own bounding
-    box so the object fills most of the frame at every orbit angle without clipping.
-    """
-    if not mesh.has_vertex_normals():
-        mesh.compute_vertex_normals()
+    """Render `num_frames` frames of `geometry` (a `TriangleMesh` or a `PointCloud`) orbiting a
+    full 360 degrees, as a list of (h, w, 3) uint8 RGB arrays. The camera distance is derived
+    from `fov_deg` and the geometry's own bounding box so the object fills most of the frame at
+    every orbit angle without clipping.
 
-    bbox = mesh.get_axis_aligned_bounding_box()
+    A point cloud has no surface for a directional light to shade, so it's rendered unlit (flat
+    per-point colour, at `point_size` screen pixels) rather than with the mesh path's lit shading.
+    """
+    is_point_cloud = isinstance(geometry, o3d.geometry.PointCloud)
+    if not is_point_cloud and not geometry.has_vertex_normals():
+        geometry.compute_vertex_normals()
+
+    bbox = geometry.get_axis_aligned_bounding_box()
     center = bbox.get_center()
     radius = float(np.linalg.norm(bbox.get_extent())) / 2  # bounding-sphere radius - orientation-
     # independent, so the object doesn't change apparent size as the camera orbits around it
     distance = radius / np.sin(np.radians(fov_deg / 2)) * 1.05  # exact sphere-fit distance + 5% margin
 
     renderer = o3d.visualization.rendering.OffscreenRenderer(width, height)
-    renderer.scene.set_background([1.0, 1.0, 1.0, 1.0])
+    renderer.scene.set_background([0.0, 0.0, 0.0, 1.0])
     material = o3d.visualization.rendering.MaterialRecord()
-    material.shader = "defaultLit"
-    renderer.scene.add_geometry("mesh", mesh, material)
-    renderer.scene.scene.set_sun_light([-0.3, -0.3, -0.9], [1.0, 1.0, 1.0], 75000)
-    renderer.scene.scene.enable_sun_light(True)
+    if is_point_cloud:
+        material.shader = "defaultUnlit"
+        material.point_size = point_size
+    else:
+        material.shader = "defaultLit"
+    renderer.scene.add_geometry("geometry", geometry, material)
+    if not is_point_cloud:
+        renderer.scene.scene.set_sun_light([-0.3, -0.3, -0.9], [1.0, 1.0, 1.0], 75000)
+        renderer.scene.scene.enable_sun_light(True)
 
     up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
     frames = []
@@ -91,15 +122,15 @@ def render_360_video(
     height: int = 720,
     elevation_deg: float = 20.0,
     fov_deg: float = 30.0,
+    point_size: float = 3.0,
 ) -> Path:
-    """Load the triangle mesh at `ply_path` and write a `num_frames`-frame, `fps`-fps 360-degree
-    orbit video to `output_path`.
+    """Load `ply_path` (a mesh or a point cloud - see `load_geometry`) and write a
+    `num_frames`-frame, `fps`-fps 360-degree orbit video to `output_path`.
     """
-    mesh = o3d.io.read_triangle_mesh(str(ply_path))
-    if len(mesh.triangles) == 0:
-        raise ValueError(f"{ply_path} has no triangles - is this a point cloud, not a mesh?")
+    geometry = load_geometry(ply_path)
     frames = render_orbit_frames(
-        mesh, num_frames=num_frames, width=width, height=height, elevation_deg=elevation_deg, fov_deg=fov_deg,
+        geometry, num_frames=num_frames, width=width, height=height,
+        elevation_deg=elevation_deg, fov_deg=fov_deg, point_size=point_size,
     )
     write_video(frames, output_path, fps=fps)
     return output_path
@@ -114,13 +145,15 @@ def render_stacked_360_video(
     row_height: int = 640,
     elevation_deg: float = 20.0,
     fov_deg: float = 30.0,
+    point_size: float = 3.0,
 ) -> Path:
-    """Render each mesh in `ply_paths` as its own independent 360-degree orbit (same
-    `num_frames`, so every mesh completes its turn in lockstep), then stack the frames
-    vertically - one row per mesh, in the given order - into a single portrait ("Reels-style")
-    video. Each mesh is framed independently within its own row (via `render_orbit_frames`'s own
-    bounding-box-based framing), so objects of very different real-world sizes still each fill
-    their row similarly, rather than being scaled relative to one another.
+    """Render each entry in `ply_paths` (mesh or point cloud, freely mixed - see `load_geometry`)
+    as its own independent 360-degree orbit (same `num_frames`, so every entry completes its turn
+    in lockstep), then stack the frames vertically - one row per entry, in the given order - into
+    a single portrait ("Reels-style") video. Each entry is framed independently within its own row
+    (via `render_orbit_frames`'s own bounding-box-based framing), so objects of very different
+    real-world sizes still each fill their row similarly, rather than being scaled relative to one
+    another.
 
     Total frame size is `width` x (`row_height` * len(ply_paths)) - e.g. the default
     1080 x (640*3) = 1080x1920 matches the standard 9:16 vertical video aspect ratio.
@@ -130,12 +163,10 @@ def render_stacked_360_video(
 
     rows = []
     for ply_path in ply_paths:
-        mesh = o3d.io.read_triangle_mesh(str(ply_path))
-        if len(mesh.triangles) == 0:
-            raise ValueError(f"{ply_path} has no triangles - is this a point cloud, not a mesh?")
+        geometry = load_geometry(ply_path)
         rows.append(render_orbit_frames(
-            mesh, num_frames=num_frames, width=width, height=row_height,
-            elevation_deg=elevation_deg, fov_deg=fov_deg,
+            geometry, num_frames=num_frames, width=width, height=row_height,
+            elevation_deg=elevation_deg, fov_deg=fov_deg, point_size=point_size,
         ))
 
     stacked_frames = [np.vstack(frame_group) for frame_group in zip(*rows)]
@@ -145,11 +176,12 @@ def render_stacked_360_video(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Render 360-degree orbit videos for textured mesh PLYs (e.g. results/*_txt.ply).",
+        description="Render 360-degree orbit videos for result PLYs - meshes or point clouds "
+                    "freely mixed (e.g. results/*_txt.ply, or *_PC.ply point-cloud exports).",
     )
     parser.add_argument("--results-dir", type=Path, default=Path("results"),
-                         help="folder to search for input meshes (default: results/)")
-    parser.add_argument("--pattern", default="*_txt.ply", help="glob pattern for input meshes")
+                         help="folder to search for input meshes/point clouds (default: results/)")
+    parser.add_argument("--pattern", default="*_txt.ply", help="glob pattern for input files")
     parser.add_argument("--out-dir", type=Path, default=None,
                          help="where to write videos (default: alongside each input file)")
     parser.add_argument("--num-frames", type=int, default=120)
@@ -158,13 +190,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--elevation-deg", type=float, default=20.0)
     parser.add_argument("--fov-deg", type=float, default=30.0)
+    parser.add_argument("--point-size", type=float, default=3.0,
+                         help="on-screen point size in pixels, for point-cloud inputs only (default: 3.0)")
     parser.add_argument("--stack", action="store_true",
-                         help="combine every matched mesh into a single vertically-stacked "
-                              "portrait video instead of one video per mesh")
+                         help="combine every matched file into a single vertically-stacked "
+                              "portrait video instead of one video per file")
     parser.add_argument("--stack-out", type=Path, default=None,
                          help="output path for the stacked video (default: <results-dir>/combined_360.mp4)")
     parser.add_argument("--row-height", type=int, default=640,
-                         help="per-mesh row height for --stack (default: 640, so 3 meshes at the "
+                         help="per-entry row height for --stack (default: 640, so 3 entries at the "
                               "default --width=1080 gives a standard 1080x1920 9:16 video)")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args(argv)
@@ -180,11 +214,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.stack:
         out_path = args.stack_out or args.results_dir / "combined_360.mp4"
-        log.info("rendering %d meshes stacked -> %s: %s", len(paths), out_path, [p.name for p in paths])
+        log.info("rendering %d entries stacked -> %s: %s", len(paths), out_path, [p.name for p in paths])
         render_stacked_360_video(
             paths, out_path, num_frames=args.num_frames, fps=args.fps,
             width=args.width, row_height=args.row_height,
-            elevation_deg=args.elevation_deg, fov_deg=args.fov_deg,
+            elevation_deg=args.elevation_deg, fov_deg=args.fov_deg, point_size=args.point_size,
         )
         log.info("wrote %s", out_path)
         return 0
@@ -196,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
         render_360_video(
             ply_path, out_path, num_frames=args.num_frames, fps=args.fps,
             width=args.width, height=args.height, elevation_deg=args.elevation_deg, fov_deg=args.fov_deg,
+            point_size=args.point_size,
         )
         log.info("wrote %s", out_path)
     return 0
