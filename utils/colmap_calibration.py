@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 import pycolmap
 
+_EXTRACTION_NUM_THREADS = 8
 
 def estimate_focal_length_px(
     image_path: Path,
@@ -124,7 +125,7 @@ def build_database(
 
     extraction_opts = pycolmap.FeatureExtractionOptions()
     extraction_opts.sift.max_num_features = max_num_features
-    extraction_opts.num_threads = num_threads
+    extraction_opts.num_threads = _EXTRACTION_NUM_THREADS
 
     fx, cx, cy = virtual_K[0, 0], virtual_K[0, 2], virtual_K[1, 2]
     reader_virtual = pycolmap.ImageReaderOptions()
@@ -138,7 +139,7 @@ def build_database(
         camera_mode=pycolmap.CameraMode.SINGLE,
         reader_options=reader_virtual,
         extraction_options=extraction_opts,
-        device=pycolmap.Device.cuda,
+        device=pycolmap.Device.cpu,
     )
 
     reader_real = pycolmap.ImageReaderOptions()
@@ -156,7 +157,7 @@ def build_database(
         camera_mode=pycolmap.CameraMode.SINGLE,
         reader_options=reader_real,
         extraction_options=extraction_opts,
-        device=pycolmap.Device.cuda,
+        device=pycolmap.Device.cpu,
     )
 
     matching_opts = pycolmap.FeatureMatchingOptions()

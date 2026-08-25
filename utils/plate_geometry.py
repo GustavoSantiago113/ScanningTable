@@ -12,7 +12,6 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-
 @dataclass
 class VirtualView:
     name: str
