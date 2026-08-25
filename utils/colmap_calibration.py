@@ -98,6 +98,18 @@ def build_database(
     `num_threads=1` (the default here) for byte-identical results run to run; raise it
     for speed once you don't need that.
 
+    Feature extraction and matching both run on GPU (`Device.cuda`) here, since SIFT
+    extraction/matching is the pipeline's biggest easy speed win with a CUDA GPU
+    available. This trades away exact byte-for-byte reproducibility even at
+    `num_threads=1`: SiftGPU's extraction order and floating-point reduction order
+    aren't as tightly controlled as the CPU (VLFeat) path's, so re-running the same
+    inputs can yield slightly different feature counts/positions run to run. `num_threads`
+    and `random_seed` still make the *downstream* stages (triangulation, incremental
+    mapping) as reproducible as before for a given database - it's specifically the
+    database contents themselves that can now vary slightly between runs. Pass
+    `device=pycolmap.Device.cpu` at the call sites below instead if exact
+    reproducibility matters more than extraction/matching speed.
+
     `real_focal_length_px` (with `real_image_size`) sets the real cameras' *starting*
     focal length explicitly (e.g. from `estimate_focal_length_px`) instead of COLMAP's
     generic `real_focal_length_factor x image width` guess. See
@@ -126,7 +138,7 @@ def build_database(
         camera_mode=pycolmap.CameraMode.SINGLE,
         reader_options=reader_virtual,
         extraction_options=extraction_opts,
-        device=pycolmap.Device.cpu,
+        device=pycolmap.Device.cuda,
     )
 
     reader_real = pycolmap.ImageReaderOptions()
@@ -144,12 +156,12 @@ def build_database(
         camera_mode=pycolmap.CameraMode.SINGLE,
         reader_options=reader_real,
         extraction_options=extraction_opts,
-        device=pycolmap.Device.cpu,
+        device=pycolmap.Device.cuda,
     )
 
     matching_opts = pycolmap.FeatureMatchingOptions()
     matching_opts.num_threads = num_threads
-    pycolmap.match_exhaustive(database_path=db_path, matching_options=matching_opts, device=pycolmap.Device.cpu)
+    pycolmap.match_exhaustive(database_path=db_path, matching_options=matching_opts, device=pycolmap.Device.cuda)
 
 
 def build_seed_reconstruction(db_path: Path, virtual_views: list, virtual_rel_names: list[str]) -> pycolmap.Reconstruction:

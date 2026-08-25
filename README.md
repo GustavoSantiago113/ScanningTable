@@ -80,7 +80,11 @@ Just like in the paper, I took some sets of different angles of the object (a 32
 # Step 4 - Camera Geometry Estimation
 
 Implemented in [camera_geometry_estimation.ipynb](camera_geometry_estimation.ipynb), using [pycolmap with cuda](https://github.com/colmap/pycolmap) for feature extraction, matching and bundle
-adjustment. The pipeline follows the paper: a sequence of virtual "photographs" of the calibration
+adjustment - SIFT extraction and matching both run on the GPU (`pycolmap.Device.cuda`) explicitly,
+not just via bundle adjustment's own solver, trading a small amount of run-to-run reproducibility
+(GPU SIFT's extraction order isn't as tightly controlled as the CPU path's) for materially faster
+extraction/matching; see `colmap_calibration.build_database`'s own docstring if byte-identical
+results across runs matter more than that speed. The pipeline follows the paper: a sequence of virtual "photographs" of the calibration
 plate is rendered from known viewpoints (paper spec: 12 views, 30&deg; apart, 45&deg; elevation;
 the notebook defaults to 24 views/15&deg; steps for denser real-photo coverage - see its parameters
 cell to reproduce the literal paper spec), registered with COLMAP at their exact known
@@ -207,7 +211,36 @@ Section 2.4.5 directly:
 > an octree depth of 14 gave a good compromise, retaining the detail of the inscriptions with a
 > tractable computational complexity.
 
-One things came up building this against real data:
+Poisson reconstruction itself runs via `pycolmap.poisson_meshing`, COLMAP's own binding around
+Kazhdan's reference PoissonRecon implementation - not `open3d`, which this implementation used
+originally (`open3d` is still used for point-cloud/mesh I/O and cleanup). Two things came up
+switching to it, both specific to running on this project's WSL development machine rather than
+algorithmic:
+
+- **`num_threads` has to stay pinned at 1.** Left at COLMAP's own default (`-1`, all cores),
+  `pycolmap.poisson_meshing` hangs on this machine - a trivial depth-6 smoke test went from 0.9s
+  at `num_threads=1` to 43s at full multithreading, and a depth-14 run at realistic point-cloud
+  scale (250,000 points) was still running after 10+ minutes (pegging ~18 of the machine's 20
+  cores) before being killed. This mirrors an already-known problem: `pymeshlab`'s own Poisson
+  filter was tried and rejected earlier in this project for the same class of issue (see the
+  Texturing section below) - sustained multithreaded load repeatedly correlating with this WSL
+  instance's own instability. Pinned to `num_threads=1`, the same depth-14/250k-point run finishes
+  in ~70.6s, against ~128s for the `open3d` path it replaced - faster as well as reliable.
+
+- **COLMAP's own trim step corrupts output at this project's data scale.** `PoissonMeshingOptions`
+  exposes a `trim` parameter (a density threshold for its own low-confidence-vertex removal), but
+  every nonzero value tested - including deliberately tiny ones - produced NaN and huge-magnitude
+  (>1000, against a true bounding box of order 100mm) vertex positions. This isn't a case of
+  picking a bad absolute number: on a realistic mm-scale test cloud, `trim=10.0` (the library's
+  own default) corrupted 86% of output vertices, while `trim=1.0` on the *same* cloud was
+  completely clean - the correct value is scale/density-dependent in a way this build gives no
+  safe way to discover in advance, and a wrong one corrupts silently rather than erroring.
+  `trim=0.0` (disabling the step outright) was the only value verified clean at every scale
+  tested, so that's what's hardcoded - which also means the returned mesh carries no per-vertex
+  density estimate the way `open3d`'s binding did.
+
+One thing came up building the original `open3d`-based version against real data, and still
+applies:
 
 - **Poisson reconstructs a phantom "bubble" surface.** Poisson fits one *global* implicit
   function across the whole point-cloud, so even a handful of points far from everything else -
@@ -226,18 +259,21 @@ One things came up building this against real data:
   wherever point density drops, and where it drops enough (a narrow base, a thin protrusion),
   the reconstructed surface doesn't taper down with it - it extrapolates past the last real point
   and rounds out into a smooth bulge with nothing behind it. Diagnosed on a real scan with a
-  sparsely-sampled base: the raw mesh's z-range extended ~16mm past the point-cloud's own lowest
-  point, and every one of those extrapolated vertices fell in the bottom ~3.5% of Poisson's own
-  per-vertex density estimate (already computed by `open3d`, previously discarded). Low density
-  isn't the same as thin-but-real, though - it flags *unsupported extrapolation* specifically:
-  `meshing.trim_low_density_vertices` drops the lowest `quantile` of vertices by that density
-  (default `quantile=0.02`), which removed the blob almost entirely on that scan while a
-  genuinely thin region elsewhere in the same mesh - lower density than the object's bulk, but
-  still backed by real points - kept over 98% of its vertices. Cutting vertices out of the mesh's
-  middle leaves small disconnected shell fragments along the cut; `meshing.remove_small_mesh_components`
-  clears those by keeping only connected triangle components of at least `min_triangles` (default
-  `100`) - on that same scan, 1,522 components dropped to ~130, and the ones removed made up
-  under 1% of the mesh's total triangles.
+  sparsely-sampled base (using the original `open3d`-based Poisson, which still returned a density
+  estimate): the raw mesh's z-range extended ~16mm past the point-cloud's own lowest point, and
+  every one of those extrapolated vertices fell in the bottom ~3.5% of Poisson's own per-vertex
+  density estimate. Low density isn't the same as thin-but-real, though - it flags *unsupported
+  extrapolation* specifically. Since switching to `pycolmap.poisson_meshing` gives up that density
+  estimate (see above), `meshing.trim_unsupported_vertices` now flags the same failure mode with a
+  differently-sourced signal instead: each mesh vertex's KD-tree distance to the nearest real point
+  in the input cloud, dropping the `quantile` fraction farthest from any real point (default
+  `quantile=0.02`) - the two metrics should behave similarly (both are low exactly where the input
+  cloud's own support is thin), but this specific metric/threshold pairing hasn't yet been
+  re-validated against real captures the way the density-based version was. Cutting vertices out of
+  the mesh's middle leaves small disconnected shell fragments along the cut;
+  `meshing.remove_small_mesh_components` clears those by keeping only connected triangle components
+  of at least `min_triangles` (default `100`) - on the scan above, 1,522 components dropped to
+  ~130, and the ones removed made up under 1% of the mesh's total triangles.
 
 # Step 9 - Texturing
 

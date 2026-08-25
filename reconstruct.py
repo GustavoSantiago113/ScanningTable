@@ -193,16 +193,18 @@ class Config:
     # catches that remove_isolated_points's size threshold alone lets through.
     crop_largest_component_fraction_warn: float = 0.3
 
-    # Meshing.
+    # Meshing (pycolmap.poisson_meshing - see utils/meshing.py's module docstring for why
+    # num_threads is pinned to 1 and trim is hardcoded to 0.0 inside poisson_reconstruct itself,
+    # not exposed here: both are safety requirements verified on this machine, not style choices).
     poisson_depth: int = 14
-    poisson_scale: float = 1.1
-    poisson_linear_fit: bool = False
+    poisson_point_weight: float = 1.0
     isolated_fraction_warn: float = 0.10
-    # Density-based trimming of Poisson's own low-confidence vertices (mesh.trim_low_density_vertices)
-    # - removes the "blob" Poisson balloons into wherever the input cloud goes sparse (e.g. thin
-    # structures), and the small disconnected shell fragments (mesh.remove_small_mesh_components)
-    # that trimming leaves behind along the cut. See both functions' docstrings.
-    poisson_density_trim_quantile: float = 0.02
+    # Distance-to-input-cloud trimming of Poisson's own worst-supported vertices
+    # (mesh.trim_unsupported_vertices) - removes the "blob" Poisson balloons into wherever the
+    # input cloud goes sparse (e.g. thin structures), and the small disconnected shell fragments
+    # (mesh.remove_small_mesh_components) that trimming leaves behind along the cut. See both
+    # functions' docstrings.
+    mesh_unsupported_trim_quantile: float = 0.02
     mesh_min_component_triangles: int = 100
 
     # Texturing.
@@ -571,9 +573,7 @@ def run_meshing(
     mesh.estimate_normals(pcd, k=cfg.normal_k)
 
     t0 = time.time()
-    tri_mesh, densities = mesh.poisson_reconstruct(
-        pcd, depth=cfg.poisson_depth, scale=cfg.poisson_scale, linear_fit=cfg.poisson_linear_fit
-    )
+    tri_mesh = mesh.poisson_reconstruct(pcd, depth=cfg.poisson_depth, point_weight=cfg.poisson_point_weight)
     vertices, faces, _colors = mesh.mesh_arrays(tri_mesh)
     log.info(
         "meshing: Poisson reconstruction done (%.1fs) -> %d vertices, %d faces",
@@ -585,7 +585,7 @@ def run_meshing(
             "merged cloud may be too sparse/noisy", len(faces),
         )
 
-    tri_mesh = mesh.trim_low_density_vertices(tri_mesh, densities, quantile=cfg.poisson_density_trim_quantile)
+    tri_mesh = mesh.trim_unsupported_vertices(tri_mesh, clean_points, quantile=cfg.mesh_unsupported_trim_quantile)
     tri_mesh = mesh.remove_small_mesh_components(tri_mesh, min_triangles=cfg.mesh_min_component_triangles)
     trimmed_vertices, trimmed_faces, _colors = mesh.mesh_arrays(tri_mesh)
     log.info(
