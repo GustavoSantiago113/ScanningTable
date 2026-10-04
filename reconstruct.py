@@ -7,7 +7,10 @@ each do into a single, non-interactive run:
 
   1. **Camera geometry estimation** (Section 2.4.1) - per set: render the virtual
      calibration sequence, extract/match SIFT features, triangulate the calibration model from
-     the virtual cameras alone, then register the real photographs against it.
+     the virtual cameras alone, then register the real photographs against it - retried at
+     several real-photo resolutions until enough photos register on a plausible turntable
+     orbit; photos COLMAP still can't place are then posed from that orbit (see
+     `utils/colmap_calibration.py`).
   2. **Dense point-cloud reconstruction** (Section 2.4.2) - per set: PatchMatchStereo +
      StereoFusion (COLMAP's dense pipeline, substituting for the paper's CMVS/PMVS - see
      `utils/dense_reconstruction.py`). **Requires a CUDA GPU.**
@@ -97,8 +100,24 @@ class Config:
     plate_border_mm: float = 5.0
 
     # Real photographs: downscaled for tractable SIFT/dense-stereo runtime. None = native
-    # resolution.
+    # resolution. Dense stereo always runs at this size; calibration searches its own (below).
     max_long_edge: int | None = 3000
+
+    # Calibration resolution search (colmap_calibration.search_calib_max_long_edge): SfM is tried
+    # at each long edge from calib_long_edge_min up to max_long_edge (smallest first; native
+    # resolution last when max_long_edge is None) until more than calib_min_registered_real
+    # photos register. At full size, background texture fills the SIFT budget before the plate.
+    calib_long_edge_min: int = 1500
+    calib_long_edge_step: int = 250
+    calib_min_registered_real: int = 30
+    # Reject an attempt whose cameras' heights above the plate spread more than this (10th-90th
+    # percentile, mm): one camera on a turntable traces a horizontal circle. None disables it.
+    calib_max_orbit_height_spread_mm: float | None = 40.0
+    # Pose photos COLMAP couldn't register from the turntable orbit (stop index in the filename).
+    fill_missing_real_cameras_from_orbit: bool = True
+    # If no long edge registers anything with approximate matching, retry with exact matching
+    # (~30-40x slower matching).
+    enable_brute_force_matching_fallback: bool = True
 
     # Virtual calibration sequence.
     n_virtual_views: int = 24
@@ -213,6 +232,19 @@ class Config:
     min_vertex_coverage_warn: float = 0.3
     camera_angle_warn_deg: float = 30.0
 
+    @property
+    def calib_long_edge_candidates(self) -> list[int | None]:
+        """Long edges for the calibration search, smallest first, capped at max_long_edge."""
+        if self.max_long_edge is not None and self.max_long_edge <= self.calib_long_edge_min:
+            return [self.max_long_edge]
+        top = self.max_long_edge if self.max_long_edge is not None else 3000
+        candidates: list[int | None] = list(range(self.calib_long_edge_min, top + 1, self.calib_long_edge_step))
+        if self.max_long_edge is None:
+            candidates.append(None)
+        elif candidates[-1] != self.max_long_edge:
+            candidates.append(self.max_long_edge)
+        return candidates
+
 
 def discover_sets(images_dir: Path) -> list[str]:
     """Every subfolder of `images_dir` that contains at least one `.jpg`, sorted by name."""
@@ -240,9 +272,6 @@ def stage_camera_geometry(set_name: str, cfg: Config) -> dict:
     out_dir = cfg.output_dir / set_name
     work_dir = out_dir / "work"
     db_path = out_dir / "colmap.db"
-    seed_triangulated_dir = out_dir / "seed_triangulated"
-    reconstruction_dir = out_dir / "reconstruction"
-    full_triangulated_dir = out_dir / "full_triangulated"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     plate_image, _ = generate_pattern.generate_pattern(
@@ -255,105 +284,90 @@ def stage_camera_geometry(set_name: str, cfg: Config) -> dict:
         raise RuntimeError(f"no .jpg photographs found in {real_dir}")
     log.info("%s: %d real photographs", set_name, len(real_srcs))
 
-    real_paths = colmap_calibration.resize_photographs(real_srcs, work_dir / set_name, cfg.max_long_edge)
-    real_rel_names = [f"{set_name}/{p.name}" for p in real_paths]
-
-    sample = cv2.imread(str(real_paths[0]))
-    if sample is None:
-        raise RuntimeError(f"could not read downscaled working photo {real_paths[0]}")
-    out_h, out_w = sample.shape[:2]
-    log.info(
-        "%s: working resolution %dx%d (%s)", set_name, out_w, out_h,
-        f"downscaled to max_long_edge={cfg.max_long_edge}" if cfg.max_long_edge else "native resolution",
-    )
-
-    virtual_views = plate_geometry.generate_virtual_views(
-        n_views=cfg.n_virtual_views, elevation_deg=cfg.virtual_elevation_deg, distance_mm=cfg.virtual_distance_mm,
-    )
-    focal_px = plate_geometry.focal_length_for_fill(
-        cfg.plate_size_mm, cfg.virtual_distance_mm, out_w, out_h, fill_fraction=cfg.plate_fill_fraction
-    )
-    virtual_K = plate_geometry.build_intrinsics(focal_px, out_w, out_h)
-
-    virtual_dir = work_dir / "calibration_pattern"
-    virtual_dir.mkdir(parents=True, exist_ok=True)
-    virtual_rel_names = []
-    for view in virtual_views:
-        rendered, _ = plate_geometry.render_plate_photograph(
-            plate_image, cfg.plate_size_mm, virtual_K, view.R, view.t, (out_w, out_h)
-        )
-        rel_name = f"calibration_pattern/{view.name}.png"
-        cv2.imwrite(str(work_dir / rel_name), rendered)
-        virtual_rel_names.append(rel_name)
-    log.info("%s: rendered %d virtual calibration photographs", set_name, len(virtual_rel_names))
-
-    real_focal_length_px = colmap_calibration.estimate_focal_length_px(real_srcs[0], out_w)
-    if real_focal_length_px is None:
-        log.warning(
-            "%s: no usable EXIF focal length on %s - falling back to COLMAP's generic focal-length "
-            "guess, which is more likely to make real-camera registration fail for this set",
-            set_name, real_srcs[0].name,
-        )
-
-    colmap_calibration.build_database(
-        db_path=db_path, work_dir=work_dir,
-        virtual_rel_names=virtual_rel_names, real_rel_names=real_rel_names, virtual_K=virtual_K,
-        real_focal_length_px=real_focal_length_px, real_image_size=(out_w, out_h),
-        max_num_features=cfg.max_num_features, random_seed=cfg.random_seed, num_threads=cfg.num_threads,
-    )
-
-    seed = colmap_calibration.build_seed_reconstruction(db_path, virtual_views, virtual_rel_names)
-    virtual_camera_id = seed.image(seed.reg_image_ids()[0]).camera_id
-    triangulated = colmap_calibration.triangulate_seed(
-        seed, db_path, work_dir, seed_triangulated_dir, random_seed=cfg.random_seed, num_threads=cfg.num_threads,
-    )
-    log.info("%s: triangulated %d calibration-plate points from the virtual cameras", set_name, triangulated.num_points3D())
-
-    reconstructions = colmap_calibration.register_real_cameras(
-        db_path, work_dir, seed_triangulated_dir, reconstruction_dir, virtual_camera_id,
+    attempt = colmap_calibration.search_calib_max_long_edge(
+        real_srcs=real_srcs, work_dir=work_dir, set_name=set_name, plate_image=plate_image,
+        plate_size_mm=cfg.plate_size_mm, n_virtual_views=cfg.n_virtual_views,
+        virtual_elevation_deg=cfg.virtual_elevation_deg, virtual_distance_mm=cfg.virtual_distance_mm,
+        plate_fill_fraction=cfg.plate_fill_fraction,
+        long_edge_candidates=cfg.calib_long_edge_candidates,
+        min_registered_real=cfg.calib_min_registered_real,
+        db_path=db_path, seed_triangulated_dir=out_dir / "seed_triangulated",
+        reconstruction_dir=out_dir / "reconstruction",
+        max_num_features=cfg.max_num_features,
         abs_pose_min_num_inliers=cfg.abs_pose_min_num_inliers,
         abs_pose_min_inlier_ratio=cfg.abs_pose_min_inlier_ratio,
         max_reg_trials=cfg.max_reg_trials, max_runtime_seconds=cfg.max_runtime_seconds,
+        max_distance_ratio=cfg.max_distance_ratio, min_camera_separation_mm=cfg.min_camera_separation_mm,
         random_seed=cfg.random_seed, num_threads=cfg.num_threads,
+        enable_brute_force_fallback=cfg.enable_brute_force_matching_fallback,
+        max_orbit_height_spread_mm=cfg.calib_max_orbit_height_spread_mm,
+        progress_cb=lambda message: log.info("%s: %s", set_name, message),
     )
-    if not reconstructions:
-        raise RuntimeError("incremental mapping produced no reconstruction at all")
-    recon = max(reconstructions.values(), key=lambda r: r.num_reg_images())
+    real_rel_names = attempt.real_rel_names
+    virtual_names = set(attempt.virtual_rel_names)
+    recon = attempt.recon
+    if attempt.num_registered_real == 0:
+        raise RuntimeError(
+            "zero real cameras registered at any candidate long edge - check the plate is visible and "
+            "well lit, or loosen abs_pose_min_num_inliers/abs_pose_min_inlier_ratio"
+        )
+    log.info(
+        "%s: calibrated at %dx%d (max_long_edge=%s), initial focal length %s",
+        set_name, attempt.out_w, attempt.out_h, attempt.max_long_edge,
+        f"{attempt.real_focal_prior_px:.0f}px ({attempt.real_focal_prior_source})"
+        if attempt.real_focal_prior_px else "COLMAP default",
+    )
+    if attempt.removed_far:
+        log.info("%s: discarded %d implausibly-far real camera(s): %s", set_name, len(attempt.removed_far), attempt.removed_far)
+    if attempt.removed_dup:
+        log.info("%s: discarded %d degenerate/duplicate real camera(s): %s", set_name, len(attempt.removed_dup), attempt.removed_dup)
 
-    removed_far = colmap_calibration.filter_implausible_real_cameras(
-        recon, set(virtual_rel_names), expected_distance_mm=cfg.virtual_distance_mm,
-        max_distance_ratio=cfg.max_distance_ratio,
-    )
-    removed_dup = colmap_calibration.filter_degenerate_real_cameras(
-        recon, set(virtual_rel_names), min_separation_mm=cfg.min_camera_separation_mm,
-    )
-    if removed_far:
-        log.info("%s: discarded %d implausibly-far real camera(s): %s", set_name, len(removed_far), removed_far)
-    if removed_dup:
-        log.info("%s: discarded %d degenerate/duplicate real camera(s): %s", set_name, len(removed_dup), removed_dup)
+    orbit_fit_names: list[str] = []
+    if cfg.fill_missing_real_cameras_from_orbit:
+        try:
+            orbit_fit_names = colmap_calibration.register_missing_real_cameras_from_orbit(recon, db_path, real_rel_names)
+        except ValueError as exc:
+            log.warning("%s: not filling unregistered photos from the turntable orbit: %s", set_name, exc)
+        if orbit_fit_names:
+            log.info(
+                "%s: positioned %d more real camera(s) from the turntable orbit: %s",
+                set_name, len(orbit_fit_names), orbit_fit_names,
+            )
 
     recon = colmap_calibration.triangulate_seed(
-        recon, db_path, work_dir, full_triangulated_dir, random_seed=cfg.random_seed, num_threads=cfg.num_threads,
+        recon, db_path, work_dir, out_dir / "full_triangulated", random_seed=cfg.random_seed, num_threads=cfg.num_threads,
     )
 
-    stats = colmap_calibration.registration_summary(recon, set(virtual_rel_names))
-    n_real = stats["num_registered_real"]
-    registered_fraction = n_real / len(real_rel_names)
+    stats = colmap_calibration.registration_summary(recon, virtual_names)
+    n_colmap = attempt.num_registered_real
+    registered_fraction = n_colmap / len(real_rel_names)
+    spread = colmap_calibration.orbit_height_spread_mm(recon, [n for n in real_rel_names if n not in set(orbit_fit_names)])
     log.info(
-        "%s: registered %d/%d real cameras (%.0f%%), mean reprojection error %.2fpx",
-        set_name, n_real, len(real_rel_names), 100 * registered_fraction, stats["mean_reprojection_error"],
+        "%s: registered %d/%d real cameras (%.0f%%) + %d from the orbit, camera height spread %.0fmm, "
+        "mean reprojection error %.2fpx",
+        set_name, n_colmap, len(real_rel_names), 100 * registered_fraction, len(orbit_fit_names), spread,
+        stats["mean_reprojection_error"],
     )
-    if n_real == 0:
-        raise RuntimeError("zero real cameras registered")
     if registered_fraction < cfg.min_registered_fraction_warn:
         log.warning(
-            "%s: only %.0f%% of real photographs registered (%d/%d) - camera geometry may be "
-            "unreliable for this set (consider raising N_VIRTUAL_VIEWS or loosening the "
-            "ABS_POSE_* thresholds)",
-            set_name, 100 * registered_fraction, n_real, len(real_rel_names),
+            "%s: only %.0f%% of real photographs registered with COLMAP (%d/%d) - camera geometry may be "
+            "unreliable for this set (orbit-filled poses rest on few anchors; consider raising "
+            "n_virtual_views or loosening the abs_pose_* thresholds)",
+            set_name, 100 * registered_fraction, n_colmap, len(real_rel_names),
         )
 
-    final_recon = colmap_calibration.strip_virtual_images(recon, set(virtual_rel_names))
+    final_recon = colmap_calibration.strip_virtual_images(recon, virtual_names)
+
+    # Dense stereo and texturing read the photos at max_long_edge, not at whatever long edge the
+    # calibration search settled on: resize them into their own folder and rescale the cameras.
+    if attempt.max_long_edge != cfg.max_long_edge:
+        dense_images_dir = out_dir / "dense_images"
+        dense_paths = colmap_calibration.resize_photographs(real_srcs, dense_images_dir / set_name, cfg.max_long_edge)
+        dense_h, dense_w = cv2.imread(str(dense_paths[0])).shape[:2]
+        colmap_calibration.rescale_cameras(final_recon, dense_w, dense_h)
+        log.info("%s: cameras rescaled %dx%d -> %dx%d for dense stereo", set_name, attempt.out_w, attempt.out_h, dense_w, dense_h)
+        work_dir = dense_images_dir
+
     return dict(final_recon=final_recon, work_dir=work_dir)
 
 
@@ -760,7 +774,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          help="set used as the registration reference frame (default: the first discovered set)")
     parser.add_argument("--max-long-edge", type=int, default=3000,
                          help="downscale real photographs so their long edge is at most this many pixels "
-                              "before SIFT/dense stereo (default: 3000)")
+                              "for dense stereo, and cap the calibration resolution search at it (default: 3000)")
     parser.add_argument("--no-downscale", action="store_true",
                          help="process real photographs at native resolution - overrides --max-long-edge")
     parser.add_argument("--num-threads", type=int, default=1,

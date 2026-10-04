@@ -2,17 +2,4 @@
 __pycache__/
 *.pyc
 
-outputs/
-outputs_test/
-outputs/*/work/
-outputs/*/*.db
-outputs/*/*.db-shm
-outputs/*/*.db-wal
-outputs/*/dense/work/
-outputs/*/dense/workspace/
-outputs/*/dense/sparse/
-outputs/*/dense/fused/
-outputs/textured/rasters/
-
-mini/*
-flower/*
+images/

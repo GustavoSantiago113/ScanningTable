@@ -102,6 +102,21 @@ retrying indefinitely. Registration also includes plausibility filters (implausi
 camera-to-plate distance, near-duplicate positions from COLMAP's linear solver failing on a
 poorly-conditioned planar-target fit) that discard failed estimates rather than keep them.
 
+`reconstruct.py` adds a few robustness steps on top of the notebook:
+
+- **Focal-length prior from the plate.** A homography between several photos and the flat pattern
+  gives the real camera's focal length (Zhang's plane constraints). EXIF is only the fallback.
+- **Resolution search.** Registration is retried at long edges from 1500px up to `--max-long-edge`
+  (smallest first) until more than 30 photos register. If nothing registers at any size, the
+  search runs again with exact (brute-force) matching.
+- **Orbit check.** An attempt whose cameras' heights spread more than 40mm is rejected, because one
+  camera on a turntable traces a horizontal circle.
+- **Orbit filling.** Photos COLMAP still couldn't place are posed by rotating their registered
+  neighbours about the fitted turntable axis. This uses the stop index in the file name
+  (`..._stop_07_...jpg`).
+
+Dense stereo still runs at `--max-long-edge`: the calibrated cameras are rescaled to that size.
+
 # Step 5 - Dense Point Cloud Reconstruction
 
 Implemented in [dense_reconstruction.ipynb](dense_reconstruction.ipynb). The paper uses CMVS/PMVS
