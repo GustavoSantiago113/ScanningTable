@@ -14,6 +14,11 @@ import '../main.dart' show kPrimary, kDark, kEspBaseUrl;
 
 const Duration kCaptureDelay = Duration(milliseconds: 1000);
 
+/// Durations offered for one constant-speed rotation in video mode.
+const List<int> kVideoRotationSeconds = [30, 60, 90, 120];
+
+enum CaptureMode { photos, video }
+
 class ScanningPage extends StatefulWidget {
   final List<CameraDescription> cameras;
   const ScanningPage({super.key, required this.cameras});
@@ -42,6 +47,12 @@ class _ScanningPageState extends State<ScanningPage> {
   // State's fields whenever the app (re)starts, so scan numbering restarts every session
   // instead of persisting across launches.
   int _scanNumber = 0;
+
+  // --- Video mode ---
+  CaptureMode _mode = CaptureMode.photos;
+  int _rotationSeconds = 60;
+  bool _recording = false;
+  double _rotationProgress = 0;
 
   @override
   void initState() {
@@ -73,9 +84,13 @@ class _ScanningPageState extends State<ScanningPage> {
       orElse: () => widget.cameras.first,
     );
 
+    // ResolutionPreset.max maps to the camera's highest video quality (often 4K) alongside a
+    // full-size photo stream, a combination many phones can't record - the recorder starts
+    // and dies silently. Video mode therefore reopens the camera at 1080p.
+    final video = _mode == CaptureMode.video;
     final controller = CameraController(
       desc,
-      ResolutionPreset.max,
+      video ? ResolutionPreset.veryHigh : ResolutionPreset.max,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.jpeg,
     );
@@ -93,12 +108,39 @@ class _ScanningPageState extends State<ScanningPage> {
       _camera = controller;
       _cameraReady = true;
     });
+    // The 1/4 s exposure would give a 4 fps, blurry video, so it's photo mode only.
+    if (video) return;
     // Apply Camera2 manual settings: 1/4 s shutter, ISO 200, f/2.4.
     try {
       await _safChannel.invokeMethod<bool>('applyCamera2Settings');
     } catch (e) {
       debugPrint('Camera2 settings not applied: $e');
     }
+  }
+
+  Future<void> _reopenCamera() async {
+    final old = _camera;
+    if (mounted) {
+      setState(() {
+        _camera = null;
+        _cameraReady = false;
+      });
+    }
+    // Drop the photo-mode Camera2 options and their extra ImageAnalysis stream before the
+    // controller goes away; photo mode re-applies them in _initCamera.
+    try {
+      await _safChannel.invokeMethod<bool>('resetCamera2Settings');
+    } catch (e) {
+      debugPrint('Camera2 reset failed: $e');
+    }
+    await old?.dispose();
+    await _initCamera();
+  }
+
+  Future<void> _switchMode(CaptureMode mode) async {
+    if (mode == _mode) return;
+    setState(() => _mode = mode);
+    await _reopenCamera();
   }
 
   // ---------------------------------------------------------------------------
@@ -229,6 +271,7 @@ class _ScanningPageState extends State<ScanningPage> {
     try {
       await http.post(_uri('/stop')).timeout(const Duration(seconds: 5));
     } catch (_) {}
+    if (_recording) await _finishVideo();
     if (mounted) {
       setState(() {
         _sequenceStarted = false;
@@ -272,6 +315,128 @@ class _ScanningPageState extends State<ScanningPage> {
   }
 
   // ---------------------------------------------------------------------------
+  // Video (one constant-speed rotation)
+  // ---------------------------------------------------------------------------
+
+  Future<void> _startVideo() async {
+    if (!_cameraReady || _recording) return;
+    setState(() {
+      _sequenceStarted = true;
+      _rotationProgress = 0;
+    });
+    try {
+      // Let auto exposure settle once, then lock it so brightness stays constant through
+      // the turn.
+      try {
+        await _camera!.setExposureMode(ExposureMode.auto);
+        await Future.delayed(const Duration(milliseconds: 800));
+        await _camera!.setExposureMode(ExposureMode.locked);
+      } catch (_) {}
+
+      // Start recording before the motor so the start of the turn is in the clip. The plugin
+      // only returns once the recorder reports it started, which never happens if the
+      // recorder dies - so don't wait forever.
+      try {
+        await _camera!.startVideoRecording().timeout(const Duration(seconds: 10));
+      } on TimeoutException {
+        // The plugin is left holding a half-started recording; reopen the camera to clear it.
+        await _reopenCamera();
+        throw Exception('camera did not start recording');
+      }
+      if (mounted) setState(() => _recording = true);
+
+      final resp = await http
+          .post(_uri('/rotate', {
+            'turns': '1',
+            'seconds': _rotationSeconds.toString(),
+          }))
+          .timeout(const Duration(seconds: 5));
+      if (resp.statusCode != 200) {
+        throw HttpException('ESP refused rotation: ${resp.statusCode} ${resp.body}');
+      }
+      if (mounted) setState(() => _scanNumber++);
+      _startVideoPolling();
+    } catch (e) {
+      debugPrint('Video start error: $e');
+      _showError('Video failed: $e');
+      if (_recording) await _finishVideo(save: false);
+      if (mounted) setState(() => _sequenceStarted = false);
+    }
+  }
+
+  void _startVideoPolling() {
+    _pollTimer?.cancel();
+    _pollTimer =
+        Timer.periodic(const Duration(milliseconds: 400), (_) async {
+      try {
+        final resp = await http
+            .get(_uri('/status'))
+            .timeout(const Duration(seconds: 5));
+        if (resp.statusCode != 200) return;
+        final data = jsonDecode(resp.body) as Map<String, dynamic>;
+        final running = data['running'] == true;
+        final progress = (data['progress'] ?? 0) as num;
+        if (mounted) setState(() => _rotationProgress = progress.toDouble());
+
+        if (!running && _recording) {
+          _pollTimer?.cancel();
+          await _finishVideo();
+          if (mounted) setState(() => _sequenceStarted = false);
+        }
+      } catch (_) {}
+    });
+  }
+
+  /// Stops the recording and copies it into the selected folder (or the fallback dir).
+  Future<void> _finishVideo({bool save = true}) async {
+    if (!_recording) return;
+    if (mounted) setState(() => _recording = false);
+    try {
+      final XFile clip =
+          await _camera!.stopVideoRecording().timeout(const Duration(seconds: 10));
+      if (save) {
+        final name =
+            '${_scanNumber.toString().padLeft(2, '0')}_video_${_ts(DateTime.now())}.mp4';
+        bool ok = false;
+        if (_safTreeUri != null) {
+          try {
+            ok = await _safChannel.invokeMethod<bool>(
+                  'copyFileToDirectory',
+                  {
+                    'treeUri': _safTreeUri,
+                    'filename': name,
+                    'sourcePath': clip.path,
+                  },
+                ) ==
+                true;
+          } catch (_) {}
+        }
+        if (!ok) {
+          final dir = await _photosDir();
+          await File(clip.path).copy('${dir.path}${Platform.pathSeparator}$name');
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Video saved: $name')),
+          );
+        }
+      }
+      try { await File(clip.path).delete(); } catch (_) {}
+    } catch (e) {
+      debugPrint('Video save error: $e');
+      if (save) _showError('Video not saved: $e');
+      if (e is TimeoutException) await _reopenCamera();
+    }
+  }
+
+  void _showError(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), backgroundColor: Colors.redAccent),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
   // UI
   // ---------------------------------------------------------------------------
 
@@ -281,7 +446,7 @@ class _ScanningPageState extends State<ScanningPage> {
         _safTreeUri != null &&
         !_sequenceStarted &&
         !_capturing;
-    final canStop = _sequenceStarted || _capturing;
+    final canStop = _sequenceStarted || _capturing || _recording;
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -311,7 +476,8 @@ class _ScanningPageState extends State<ScanningPage> {
       color: Colors.black,
       child: Center(
         child: AspectRatio(
-          aspectRatio: 3 / 4,
+          // Portrait preview: 3:4 for photos, 9:16 for 1080p video.
+          aspectRatio: 1 / _camera!.value.aspectRatio,
           child: CameraPreview(_camera!),
         ),
       ),
@@ -369,12 +535,61 @@ class _ScanningPageState extends State<ScanningPage> {
               ),
             const SizedBox(height: 14),
 
+            // Capture mode
+            SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<CaptureMode>(
+                segments: const [
+                  ButtonSegment(
+                    value: CaptureMode.photos,
+                    icon: Icon(Icons.photo_camera_rounded),
+                    label: Text('Photos'),
+                  ),
+                  ButtonSegment(
+                    value: CaptureMode.video,
+                    icon: Icon(Icons.videocam_rounded),
+                    label: Text('Video'),
+                  ),
+                ],
+                selected: {_mode},
+                onSelectionChanged: (canStop || !_cameraReady)
+                    ? null
+                    : (s) => _switchMode(s.first),
+              ),
+            ),
+            if (_mode == CaptureMode.video) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  const Text('Full turn in',
+                      style: TextStyle(color: Colors.black54, fontSize: 13)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: SegmentedButton<int>(
+                      showSelectedIcon: false,
+                      segments: [
+                        for (final secs in kVideoRotationSeconds)
+                          ButtonSegment(value: secs, label: Text('${secs}s')),
+                      ],
+                      selected: {_rotationSeconds},
+                      onSelectionChanged: canStop
+                          ? null
+                          : (s) => setState(() => _rotationSeconds = s.first),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 14),
+
             // Scan / Stop buttons
             Row(
               children: [
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: canScan ? _httpStart : null,
+                    onPressed: canScan
+                        ? (_mode == CaptureMode.video ? _startVideo : _httpStart)
+                        : null,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: kPrimary,
                       foregroundColor: Colors.white,
@@ -390,9 +605,13 @@ class _ScanningPageState extends State<ScanningPage> {
                             child: CircularProgressIndicator(
                                 strokeWidth: 2, color: Colors.white),
                           )
-                        : const Icon(Icons.document_scanner_rounded),
+                        : Icon(_mode == CaptureMode.video
+                            ? Icons.fiber_manual_record_rounded
+                            : Icons.document_scanner_rounded),
                     label: Text(
-                      _capturing ? 'Capturing…' : 'Scan',
+                      _capturing
+                          ? 'Capturing…'
+                          : (_mode == CaptureMode.video ? 'Record' : 'Scan'),
                       style: const TextStyle(
                           fontSize: 16, fontWeight: FontWeight.w700),
                     ),
@@ -437,7 +656,9 @@ class _ScanningPageState extends State<ScanningPage> {
                   Text(
                     _capturing
                         ? 'Capturing photo…'
-                        : 'Scanning — stop $_lastProcessedStop / 36',
+                        : _mode == CaptureMode.video
+                            ? 'Recording — ${(_rotationProgress * 100).round()}% of turn'
+                            : 'Scanning — stop $_lastProcessedStop / 36',
                     style: const TextStyle(
                         color: Colors.black54, fontSize: 13),
                   ),

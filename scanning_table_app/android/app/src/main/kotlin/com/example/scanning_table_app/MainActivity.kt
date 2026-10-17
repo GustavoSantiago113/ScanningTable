@@ -15,17 +15,21 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.core.Camera
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import java.io.File
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.gustavo.saf"
     private val PICK_DIRECTORY_REQUEST = 42
     private var pendingResult: MethodChannel.Result? = null
+    private var analysisUseCase: ImageAnalysis? = null
+    private var boundCamera: Camera? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -48,12 +52,30 @@ class MainActivity : FlutterActivity() {
                         result.error("INVALID_ARGS", "Missing required arguments", null)
                     }
                 }
+                "copyFileToDirectory" -> {
+                    val treeUri = call.argument<String>("treeUri")
+                    val filename = call.argument<String>("filename")
+                    val sourcePath = call.argument<String>("sourcePath")
+
+                    if (treeUri != null && filename != null && sourcePath != null) {
+                        // Videos can be hundreds of MB: stream the copy off the main thread.
+                        Thread {
+                            val success = copyFileToDirectory(treeUri, filename, sourcePath)
+                            runOnUiThread { result.success(success) }
+                        }.start()
+                    } else {
+                        result.error("INVALID_ARGS", "Missing required arguments", null)
+                    }
+                }
                 "openDownloads" -> {
                     openDownloadsFolder()
                     result.success(true)
                 }
                 "applyCamera2Settings" -> {
                     applyCamera2Settings(result)
+                }
+                "resetCamera2Settings" -> {
+                    resetCamera2Settings(result)
                 }
                 else -> {
                     result.notImplemented()
@@ -93,6 +115,32 @@ class MainActivity : FlutterActivity() {
                 outputStream.flush()
             }
             
+            return true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return false
+        }
+    }
+
+    private fun copyFileToDirectory(treeUriString: String, filename: String, sourcePath: String): Boolean {
+        try {
+            val treeUri = Uri.parse(treeUriString)
+            val documentFile = DocumentFile.fromTreeUri(this, treeUri) ?: return false
+
+            var file = documentFile.findFile(filename)
+            if (file == null) {
+                file = documentFile.createFile("application/octet-stream", filename)
+            }
+
+            if (file == null) return false
+
+            File(sourcePath).inputStream().use { input ->
+                contentResolver.openOutputStream(file.uri)?.use { output ->
+                    input.copyTo(output)
+                    output.flush()
+                } ?: return false
+            }
+
             return true
         } catch (e: Exception) {
             e.printStackTrace()
@@ -172,15 +220,19 @@ class MainActivity : FlutterActivity() {
                 // Bind a no-op ImageAnalysis to obtain the Camera object.
                 // CameraX 1.1+ bindToLifecycle is additive — Flutter's Preview &
                 // ImageCapture use cases remain bound alongside this one.
-                val imageAnalysis = ImageAnalysis.Builder().build()
-                imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(this)) { it.close() }
+                // Reuse the same use case so repeated calls don't stack up analyzers.
+                val imageAnalysis = analysisUseCase ?: ImageAnalysis.Builder().build().also {
+                    it.setAnalyzer(ContextCompat.getMainExecutor(this)) { img -> img.close() }
+                    analysisUseCase = it
+                }
 
                 val camera = cameraProvider.bindToLifecycle(
                     this, CameraSelector.DEFAULT_BACK_CAMERA, imageAnalysis
                 )
+                boundCamera = camera
 
-                Camera2CameraControl.from(camera.cameraControl)
-                    .captureRequestOptions = CaptureRequestOptions.Builder()
+                Camera2CameraControl.from(camera.cameraControl).setCaptureRequestOptions(
+                    CaptureRequestOptions.Builder()
                         // 1/4 second shutter speed = 250,000,000 nanoseconds
                         .setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, 250_000_000L)
                         // ISO 200
@@ -188,7 +240,28 @@ class MainActivity : FlutterActivity() {
                         // f/2.4 aperture (no-op on fixed-aperture lenses)
                         .setCaptureRequestOption(CaptureRequest.LENS_APERTURE, 2.4f)
                         .build()
+                )
 
+                result.success(true)
+            } catch (e: Exception) {
+                result.error("CAMERA2_ERROR", e.message, null)
+            }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    // Undo applyCamera2Settings for video: drop the 1/4 s manual exposure and unbind the extra
+    // ImageAnalysis use case so the camera has a free stream for the plugin's VideoCapture.
+    @SuppressLint("UnsafeOptInUsageError")
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun resetCamera2Settings(result: MethodChannel.Result) {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+        cameraProviderFuture.addListener({
+            try {
+                boundCamera?.let {
+                    Camera2CameraControl.from(it.cameraControl).clearCaptureRequestOptions()
+                }
+                analysisUseCase?.let { cameraProviderFuture.get().unbind(it) }
+                boundCamera = null
                 result.success(true)
             } catch (e: Exception) {
                 result.error("CAMERA2_ERROR", e.message, null)

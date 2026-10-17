@@ -46,7 +46,19 @@ To support the phone, I used the tripod design found in ThingIverse: https://www
 
 The script to run the ESP8266 is available at [ESP8266.ino](ESP8266\ESP8266.ino). The number of rotations is fixed on 36 (10 degree interval). The ESP creates a WebServer, with a Wi-Fi name and a password. The app sends requests to the ESP, such as: `start`, `stop`, and `continue`. The ESP sends the command `waiting` to the app so it knows when to take the picture.
 
+The motor is driven in half-step mode from a hardware timer interrupt, and every move ramps its speed up and down, so the motion is smooth and Wi-Fi traffic doesn't disturb the step timing. Endpoints:
+
+| Endpoint | Description |
+|---|---|
+| `GET /status` | JSON with `running`, `mode` (`idle`/`scan`/`rotate`), `moving`, `waitingForContinue`, `currentStop`, `totalStops`, `position`, `progress` |
+| `POST /start?turns=<n>[&rpm=<r>]` | Stop-and-go scan with 36 stops |
+| `POST /continue` | Move to the next stop after the photo is taken |
+| `POST /rotate?turns=<n>[&rpm=<r> \| &seconds=<s>]` | One continuous, smooth rotation; negative `turns` reverses. `seconds` sets the time for the whole move |
+| `POST /stop` | Decelerates to a stop and cancels the current job |
+
 The [app](scanning_table_app) was made in *Flutter* and **tested on an Android device only**. It has a initial page, only allowing to move to the next page (taking pictures) when the cellphone is connected to the ESP. To start scanning the user first must to choose the folder where the images are going to be saved. After that, the user can click on `Scan` and the app + ESP does the rest automatically. If something goes wrong, the user can click on `stop`, and the operation will be stopped.
+
+In `Video` mode, the app records one full turn at constant speed instead (30, 60, 90 or 120 s per turn). It saves the clip as `<scan>_video_<timestamp>.mp4` in the same folder. Switching to Video mode reopens the camera at 1080p without the 1/4 s photo exposure, since many phones can't record at the maximum resolution used for photos.
 
 Each photo is saved as `<scan>_stop_<stop>_<timestamp>.jpg`, e.g. `01_stop_03_20260703_163620.jpg` - `<scan>` numbers each full rotation sequence within the current app session (`01` for the first press of `Scan`, `02` for the second, and so on) and resets back to `01` every time the app is (re)started, so photos from different scans in the same folder never collide or get mixed up.
 
